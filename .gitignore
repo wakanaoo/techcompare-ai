@@ -1,0 +1,24 @@
+# --- Secrets ---
+# .envには実際のDB接続情報などが入るため、絶対にコミットしない。
+# .env.exampleだけは「変数名の一覧」として共有するので明示的に許可する。
+.env
+.env.*
+!.env.example
+
+# --- Python (backend) ---
+backend/venv/
+backend/.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+*.egg-info/
+
+# --- Node.js / Next.js (frontend) ---
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+npm-debug.log*
+
+# --- OS ---
+.DS_Store
+Thumbs.db
