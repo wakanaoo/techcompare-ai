@@ -9,6 +9,8 @@ from enum import Enum
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.schemas.criteria import Criterion
+
 
 class ResearchStatus(str, Enum):
     """statusとして許される値をPython側で明確にするためのEnum。
@@ -23,24 +25,64 @@ class ResearchStatus(str, Enum):
     failed = "failed"
 
 
+class Winner(str, Enum):
+    item_a = "item_a"
+    item_b = "item_b"
+    tie = "tie"
+
+
 class ResearchCreate(BaseModel):
     """POST /research のリクエストボディ。"""
 
     item_a: str = Field(..., min_length=1, description="比較対象の技術A(例: FastAPI)")
     item_b: str = Field(..., min_length=1, description="比較対象の技術B(例: Django)")
     goal: str = Field(..., min_length=1, description="比較の目的・利用シーン")
+    criteria: list[Criterion] = Field(
+        ..., min_length=1, max_length=5, description="比較軸(1〜5個)"
+    )
 
 
 class ResearchRead(BaseModel):
-    """POST /research と GET /research/{id} のレスポンス。"""
+    """POST /research と GET /research/{id} のレスポンス(polling用の軽量版)。"""
 
     id: int
     item_a: str
     item_b: str
     goal: str
+    criteria: list[str]
     status: ResearchStatus
+    error_message: str | None
     created_at: datetime
     updated_at: datetime
 
     # SQLAlchemyのモデルインスタンスからそのまま変換できるようにする設定。
     model_config = ConfigDict(from_attributes=True)
+
+
+class RecommendationRead(BaseModel):
+    winner: Winner
+    summary: str
+    reason: str
+
+
+class ComparisonRead(BaseModel):
+    criterion: str
+    criterion_label: str
+    item_a_summary: str
+    item_b_summary: str
+    item_a_score: int
+    item_b_score: int
+    winner: Winner
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class ResearchResultRead(BaseModel):
+    """GET /research/{id}/result のレスポンス(completed時のみ)。"""
+
+    research_id: int
+    item_a: str
+    item_b: str
+    goal: str
+    recommendation: RecommendationRead
+    comparisons: list[ComparisonRead]

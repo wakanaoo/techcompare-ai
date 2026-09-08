@@ -6,17 +6,23 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.research import router as research_router
+from app.core.config import settings
 from app.db.session import Base, engine
 
 # モデルをBase.metadata に登録するためimportしておく(直接は使わない)。
+from app.models import comparison as _comparison_model  # noqa: F401
 from app.models import research as _research_model  # noqa: F401
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Phase 1: Alembicは導入せず、起動時にcreate_all()でテーブルを作る簡易運用。
-    # (理由はbackend/README.mdの「Migrationについて」を参照)
-    Base.metadata.create_all(bind=engine)
+    # Phase 2からテーブル管理はAlembicのmigrationに一本化した
+    # (`alembic upgrade head`)。ただし使い捨てのSQLite(pytestの一時DB)は
+    # 毎回migrationを流すほどの価値がないため、その場合だけ従来通り
+    # create_all()で即席にテーブルを作る。
+    # 理由の詳細はREADMEの「Migrationについて」を参照。
+    if settings.database_url.startswith("sqlite"):
+        Base.metadata.create_all(bind=engine)
     yield
 
 
