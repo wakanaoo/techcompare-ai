@@ -33,7 +33,17 @@ export interface Recommendation {
   reason: string;
 }
 
+export interface EvidenceSummary {
+  id: number;
+  source_id: number;
+  source_title: string;
+  source_url: string;
+  claim: string;
+  evidence_text: string;
+}
+
 export interface ComparisonRow {
+  id: number;
   criterion: string;
   criterion_label: string;
   item_a_summary: string;
@@ -41,6 +51,13 @@ export interface ComparisonRow {
   item_a_score: number;
   item_b_score: number;
   winner: Winner;
+  evidence: EvidenceSummary[];
+}
+
+export interface SourceSummary {
+  id: number;
+  title: string;
+  url: string;
 }
 
 export interface ResearchResult {
@@ -50,6 +67,18 @@ export interface ResearchResult {
   goal: string;
   recommendation: Recommendation;
   comparisons: ComparisonRow[];
+  sources: SourceSummary[];
+}
+
+export interface EvidenceDetail {
+  id: number;
+  claim: string;
+  evidence_text: string;
+  source_title: string;
+  source_url: string;
+  comparison_id: number;
+  research_id: number;
+  criterion_label: string;
 }
 
 export async function createResearch(
@@ -76,6 +105,19 @@ export async function getResearch(id: string): Promise<Research> {
   }
   if (!response.ok) {
     throw new Error(`Researchの取得に失敗しました (status: ${response.status})`);
+  }
+
+  return response.json();
+}
+
+export async function getEvidence(id: string): Promise<EvidenceDetail> {
+  const response = await fetch(`${API_BASE_URL}/evidence/${id}`);
+
+  if (response.status === 404) {
+    throw new Error("指定されたEvidenceが見つかりません");
+  }
+  if (!response.ok) {
+    throw new Error(`Evidenceの取得に失敗しました (status: ${response.status})`);
   }
 
   return response.json();

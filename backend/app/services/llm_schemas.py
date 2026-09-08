@@ -26,6 +26,27 @@ class ComparisonCriterionResult(BaseModel):
     item_b_score: int = Field(..., ge=1, le=5, description="技術Bのこの軸でのスコア(1〜5、5が最高)")
     winner: Winner = Field(..., description="この軸でどちらが優れているか")
 
+    # NOTE: 根拠本文(evidence_text)自体はLLMに生成させない。
+    # LLMが担うのは「提供した情報源のうち、どれを根拠にしたか(id)」の選択だけ。
+    # 実際の根拠本文はbackend側でSource.contentから複製する
+    # (research_runner.py参照)。存在しないIDを挙げた場合はbackend側で無視する。
+    item_a_source_ids: list[int] = Field(
+        default_factory=list,
+        description=(
+            "item_a_summaryの根拠にした情報源のID一覧。"
+            "提供された情報源に明確な記載がない場合は空リストにすること。"
+            "存在しないIDを作り出さないこと。"
+        ),
+    )
+    item_b_source_ids: list[int] = Field(
+        default_factory=list,
+        description=(
+            "item_b_summaryの根拠にした情報源のID一覧。"
+            "提供された情報源に明確な記載がない場合は空リストにすること。"
+            "存在しないIDを作り出さないこと。"
+        ),
+    )
+
 
 class RecommendationResult(BaseModel):
     """総合的な推奨結果。"""

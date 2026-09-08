@@ -50,3 +50,6 @@ class Comparison(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
     research = relationship("Research", back_populates="comparisons")
+    evidences = relationship(
+        "Evidence", back_populates="comparison", cascade="all, delete-orphan"
+    )

@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useEffect, useState } from "react";
 import { useParams } from "next/navigation";
 
@@ -83,6 +84,7 @@ export default function ComparisonReportPage() {
                   <th style={cellStyle}>{result.item_a}</th>
                   <th style={cellStyle}>{result.item_b}</th>
                   <th style={cellStyle}>優位</th>
+                  <th style={cellStyle}>根拠</th>
                 </tr>
               </thead>
               <tbody>
@@ -102,11 +104,39 @@ export default function ComparisonReportPage() {
                     <td style={cellStyle}>
                       {winnerLabel(row.winner, result.item_a, result.item_b)}
                     </td>
+                    <td style={cellStyle}>
+                      {row.evidence.length === 0 ? (
+                        <span style={{ opacity: 0.6 }}>根拠なし</span>
+                      ) : (
+                        row.evidence.map((ev) => (
+                          <div key={ev.id}>
+                            <Link href={`/evidence/${ev.id}`}>根拠を見る</Link>
+                          </div>
+                        ))
+                      )}
+                    </td>
                   </tr>
                 ))}
               </tbody>
             </table>
           </div>
+
+          <h2 style={{ marginTop: "1.5rem", marginBottom: "0.5rem" }}>
+            参照した情報源
+          </h2>
+          {result.sources.length === 0 ? (
+            <p style={{ opacity: 0.7 }}>参照できる情報源が見つかりませんでした。</p>
+          ) : (
+            <ul>
+              {result.sources.map((source) => (
+                <li key={source.id}>
+                  <a href={source.url} target="_blank" rel="noreferrer">
+                    {source.title}
+                  </a>
+                </li>
+              ))}
+            </ul>
+          )}
 
           <p
             style={{
@@ -117,7 +147,9 @@ export default function ComparisonReportPage() {
               paddingTop: "0.75rem",
             }}
           >
-            現在の比較はLLM知識をもとに生成されており、外部情報源による検証はPhase 3で追加予定です。
+            比較結果は上記の情報源に基づいてLLMが生成したものです。情報源に
+            明確な記載がない場合は、その旨をLLMが明示するよう設計していますが、
+            内容の正確性は必ず元の情報源(上記リンク)でもご確認ください。
           </p>
         </>
       )}

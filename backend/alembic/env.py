@@ -15,7 +15,9 @@ from app.db.session import Base  # noqa: E402
 
 # モデルをBase.metadataに登録するためimportする(直接は使わない)。
 from app.models import comparison as _comparison_model  # noqa: E402,F401
+from app.models import evidence as _evidence_model  # noqa: E402,F401
 from app.models import research as _research_model  # noqa: E402,F401
+from app.models import source as _source_model  # noqa: E402,F401
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.

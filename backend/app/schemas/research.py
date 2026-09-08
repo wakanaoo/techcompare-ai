@@ -65,7 +65,19 @@ class RecommendationRead(BaseModel):
     reason: str
 
 
+class EvidenceRead(BaseModel):
+    """Comparison Report画面の比較表に埋め込む、根拠の要約表示用。"""
+
+    id: int
+    source_id: int
+    source_title: str
+    source_url: str
+    claim: str
+    evidence_text: str
+
+
 class ComparisonRead(BaseModel):
+    id: int
     criterion: str
     criterion_label: str
     item_a_summary: str
@@ -73,6 +85,13 @@ class ComparisonRead(BaseModel):
     item_a_score: int
     item_b_score: int
     winner: Winner
+    evidence: list[EvidenceRead] = []
+
+
+class SourceRead(BaseModel):
+    id: int
+    title: str
+    url: str
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -86,3 +105,4 @@ class ResearchResultRead(BaseModel):
     goal: str
     recommendation: RecommendationRead
     comparisons: list[ComparisonRead]
+    sources: list[SourceRead]

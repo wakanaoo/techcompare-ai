@@ -59,3 +59,6 @@ class Research(Base):
     comparisons = relationship(
         "Comparison", back_populates="research", cascade="all, delete-orphan"
     )
+    sources = relationship(
+        "Source", back_populates="research", cascade="all, delete-orphan"
+    )

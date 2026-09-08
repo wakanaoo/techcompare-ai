@@ -12,10 +12,12 @@ from app.db.session import get_db
 from app.models.research import Research
 from app.schemas.research import (
     ComparisonRead,
+    EvidenceRead,
     RecommendationRead,
     ResearchCreate,
     ResearchRead,
     ResearchResultRead,
+    SourceRead,
 )
 from app.services.research_runner import run_research
 
@@ -88,6 +90,28 @@ def get_research_result(research_id: int, db: Session = Depends(get_db)) -> Rese
             reason=research.recommendation_reason,
         ),
         comparisons=[
-            ComparisonRead.model_validate(c) for c in research.comparisons
+            ComparisonRead(
+                id=c.id,
+                criterion=c.criterion,
+                criterion_label=c.criterion_label,
+                item_a_summary=c.item_a_summary,
+                item_b_summary=c.item_b_summary,
+                item_a_score=c.item_a_score,
+                item_b_score=c.item_b_score,
+                winner=c.winner,
+                evidence=[
+                    EvidenceRead(
+                        id=e.id,
+                        source_id=e.source_id,
+                        source_title=e.source.title,
+                        source_url=e.source.url,
+                        claim=e.claim,
+                        evidence_text=e.evidence_text,
+                    )
+                    for e in c.evidences
+                ],
+            )
+            for c in research.comparisons
         ],
+        sources=[SourceRead.model_validate(s) for s in research.sources],
     )

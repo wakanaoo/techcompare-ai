@@ -5,13 +5,16 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.api.evidence import router as evidence_router
 from app.api.research import router as research_router
 from app.core.config import settings
 from app.db.session import Base, engine
 
 # モデルをBase.metadata に登録するためimportしておく(直接は使わない)。
 from app.models import comparison as _comparison_model  # noqa: F401
+from app.models import evidence as _evidence_model  # noqa: F401
 from app.models import research as _research_model  # noqa: F401
+from app.models import source as _source_model  # noqa: F401
 
 
 @asynccontextmanager
@@ -37,6 +40,7 @@ app.add_middleware(
 )
 
 app.include_router(research_router)
+app.include_router(evidence_router)
 
 
 @app.get("/health")

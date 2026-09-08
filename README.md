@@ -3,16 +3,21 @@
 技術選定(例: FastAPI vs Django)を、複数の情報源の調査・構造化・比較・根拠提示によって
 サポートするResearch & Comparison Toolです。AI/Web開発の学習ツールも兼ねています。
 
-**現在のフェーズ: Phase 2 (LLMによる構造化比較)**
+**現在のフェーズ: Phase 3 (Web検索による根拠付け)**
 
-New Research画面 → `POST /research` → PostgreSQLへ保存 → LLM(Gemini API)へ
-比較依頼 → Structured Outputで比較結果取得 → PostgreSQLへ保存 →
-Comparison Report画面で表示、という流れが動く状態です。
+New Research画面 → `POST /research` → PostgreSQLへ保存 →
+**Web検索(Tavily API)で情報源を取得・保存** → 取得した情報源を根拠として
+LLM(Gemini API)を1回呼び出しStructured Outputで比較結果取得 →
+PostgreSQLへ保存 → Comparison Report画面で表示、Evidence Viewerで
+根拠を確認、という流れが動く状態です。
 
-> **重要**: Phase 2の比較結果はLLM自身の知識のみに基づいて生成されており、
-> Web検索等の外部情報源によってGroundingされていません。**最終仕様ではありません。**
-> Phase 3以降でSearch API・信頼できるSource・Evidence・Citationを追加し、
-> 根拠を確認できるようにする予定です。
+処理は「2-stage pipeline」(検索 → grounded comparison生成)と呼んでいます。
+**LLM呼び出しは1回だけ**です(検索とLLM呼び出しを分離しているだけで、
+LLMを2回呼んでいるわけではありません)。
+
+> **既知の限界**: 検索結果に基づいてLLMが比較を生成しますが、LLMの回答が
+> 情報源の内容を完全に正確に要約している保証はありません。Evidence Viewerで
+> 必ず元の情報源(URL)も確認してください。
 
 ## 技術構成
 
@@ -21,8 +26,9 @@ Comparison Report画面で表示、という流れが動く状態です。
 | Frontend | Next.js (App Router) / React / TypeScript |
 | Backend | Python / FastAPI / Pydantic / SQLAlchemy / Alembic |
 | Database | PostgreSQL (Docker Compose) |
+| Web検索 | Tavily API |
 | AI | Google Gemini API (`gemini-3.6-flash`, Structured Output) |
-| Testing | pytest (LLM呼び出しはmock) |
+| Testing | pytest (検索・LLM呼び出しはmock) |
 
 ## ディレクトリ構成
 
@@ -34,21 +40,26 @@ Comparison Report画面で表示、という流れが動く状態です。
 │   ├── alembic/               # DB migration
 │   ├── app/
 │   │   ├── main.py               # アプリのエントリーポイント
-│   │   ├── api/research.py       # POST/GET /research, GET /research/{id}/result
-│   │   ├── models/               # research.py, comparison.py (SQLAlchemy)
-│   │   ├── schemas/              # research.py, criteria.py (Pydantic, API用)
+│   │   ├── api/
+│   │   │   ├── research.py         # POST/GET /research, GET /research/{id}/result
+│   │   │   └── evidence.py         # GET /evidence/{id}
+│   │   ├── models/                 # research.py, comparison.py, source.py, evidence.py
+│   │   ├── schemas/                # research.py, criteria.py, evidence.py (Pydantic, API用)
 │   │   ├── services/
+│   │   │   ├── search_client.py     # Tavily API呼び出し(Web検索)
 │   │   │   ├── llm_schemas.py       # LLM Structured Output用スキーマ
 │   │   │   ├── llm_client.py        # Gemini API呼び出し
 │   │   │   └── research_runner.py   # BackgroundTasksから呼ばれる処理本体
 │   │   ├── db/session.py         # DB接続設定
 │   │   └── core/config.py        # 環境変数の読み込み
+│   ├── scripts/                  # 一度きりの検証用スクリプト(PoC)
 │   ├── tests/
 │   └── .env.example
 └── frontend/             # Next.js
     ├── app/page.tsx                          # New Research画面
     ├── app/research/[id]/page.tsx            # Research Progress画面(polling)
     ├── app/research/[id]/result/page.tsx     # Comparison Report画面
+    ├── app/evidence/[id]/page.tsx            # Evidence Viewer画面
     ├── lib/api.ts                            # Backend呼び出し用クライアント
     ├── lib/criteria.ts                       # 比較軸の固定候補
     └── .env.local.example
@@ -67,11 +78,11 @@ docker compose up -d db
 
 ```bash
 cd backend
-cp .env.example .env   # DATABASE_URLは上のPostgreSQL設定と揃える。GEMINI_API_KEYも設定する
+cp .env.example .env   # DATABASE_URLは上のPostgreSQL設定と揃える。GEMINI_API_KEY/TAVILY_API_KEYも設定する
 python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
-alembic upgrade head     # DBスキーマを最新化する(初回・Phase 2以降は毎回)
+alembic upgrade head     # DBスキーマを最新化する(初回・Phase以降変更のたびに毎回)
 uvicorn app.main:app --reload
 ```
 
@@ -99,6 +110,15 @@ Research Progress画面で進捗がpollingされ、完了するとComparison Rep
 キーが未設定/無効な場合、Researchのstatusは自動的に`failed`になり、
 `error_message`にエラー内容が保存されます(サーバー自体はクラッシュしません)。
 
+### Tavily APIキーの設定(Phase 3から追加)
+
+`backend/.env` の `TAVILY_API_KEY` に、Tavilyのアカウント作成
+(https://app.tavily.com) 後に発行されるAPIキーを設定してください。
+クレジットカード登録は不要です(無料プランで開始できます)。
+
+キーが未設定/無効な場合、Researchのstatusは自動的に`failed`になり、
+`error_message`にエラー内容が保存されます(サーバー自体はクラッシュしません)。
+
 ## テスト
 
 ```bash
@@ -107,11 +127,12 @@ source venv/bin/activate
 pytest -v
 ```
 
-BackendのテストはPostgreSQLやGEMINI_API_KEYがなくても実行できます。
-DBはテスト専用のSQLiteファイルに一時的に差し替え、LLM呼び出し
+BackendのテストはPostgreSQL・GEMINI_API_KEY・TAVILY_API_KEYがなくても実行できます。
+DBはテスト専用のSQLiteファイルに一時的に差し替え、Web検索
+(`app.services.research_runner.search_technology`)とLLM呼び出し
 (`app.services.research_runner.generate_comparison`)は`monkeypatch`でmockに
 差し替えているため、テストのたびに課金・ネットワーク通信は発生しません。
-実際のLLM APIを使った確認は手動E2Eとして行います。
+実際のAPIを使った確認は手動E2Eとして行います。
 
 ## Database Migration (Alembic)
 
@@ -128,19 +149,23 @@ alembic revision --autogenerate -m "説明"   # モデル変更からmigration�
 - `alembic/versions/de7d53756ae3_*.py` : 初期migration(Phase 1の`researches`テーブル)
 - `alembic/versions/2d1d4f1c1aa2_*.py` : Phase 2 migration(`comparisons`テーブル追加、
   `researches`への列追加)
+- `alembic/versions/fec2d93e67a8_*.py` : Phase 3 migration(`sources`/`evidences`
+  テーブル追加)。新規に空のPostgreSQL DBに対して`alembic upgrade head`を実行し、
+  全migrationが順番に適用されて同じスキーマが再現できることを確認済み。
 
-destructiveな変更(列やテーブルのDROPを伴うもの)はPhase 2時点では行っていません。
+destructiveな変更(列やテーブルのDROPを伴うもの)はPhase 3時点でも行っていません。
 
-## API一覧 (Phase 2時点)
+## API一覧 (Phase 3時点)
 
 | Method | Path | 説明 |
 |---|---|---|
-| POST | `/research` | 新しいResearchを作成し、裏でLLM比較処理を開始する |
+| POST | `/research` | 新しいResearchを作成し、裏でWeb検索+LLM比較処理を開始する |
 | GET | `/research/{id}` | Researchのstatus等を取得する(polling用の軽量API) |
-| GET | `/research/{id}/result` | 完了したResearchの比較結果を取得する(未完了時は409、失敗時は422) |
+| GET | `/research/{id}/result` | 完了したResearchの比較結果を取得する(未完了時は409、失敗時は422)。各comparisonに`evidence`、レスポンス全体に`sources`を含む |
+| GET | `/evidence/{id}` | 1件のEvidenceの詳細を取得する(Evidence Viewer画面用) |
 | GET | `/health` | 死活監視用 |
 
-## Database構造 (Phase 2時点)
+## Database構造 (Phase 3時点)
 
 ```
 researches
@@ -157,6 +182,19 @@ comparisons                          -- Research 1 : N Comparisons
   item_a_summary, item_b_summary,
   item_a_score, item_b_score (1〜5, CHECK制約),
   winner (item_a/item_b/tie, CHECK制約),
+  created_at
+
+sources                              -- Research 1 : N Sources(Phase 3で追加)
+  id, research_id (FK -> researches.id, ON DELETE CASCADE),
+  title, url,
+  content (Tavily APIが実際に取得した本文。LLMの自由生成ではない),
+  retrieved_at
+
+evidences                            -- Comparison 1 : N Evidences(Phase 3で追加)
+  id, comparison_id (FK -> comparisons.id, ON DELETE CASCADE),
+  source_id (FK -> sources.id, ON DELETE CASCADE),
+  claim (backend側で組み立てる定型文。LLMの自由生成ではない),
+  evidence_text (sources.contentをそのまま複製。LLMの自由生成ではない),
   created_at
 ```
 
@@ -226,6 +264,40 @@ Provider抽象化レイヤーは作らず、`app/services/llm_client.py`で直�
 (結果: 問題なく動作し、`response.parsed`が検証済みのネスト構造インスタンスとして
 返ってきました。上記の通りモデル名の見直しも同時に必要になりました)。
 
+## Web検索Provider選定(Phase 3)
+
+**Tavily API**を採用しています。比較したのは以下の3つです(いずれも2026年9月時点、
+公式ドキュメントで確認)。
+
+| 観点 | Gemini内蔵Grounding | Tavily API | 自前HTTP取得 |
+|---|---|---|---|
+| 無料枠 | 月5,000件無料だが、3.x系モデルではFree Tier(課金アカウント未登録状態)では非対応。実質的に課金アカウント登録が必要 | 月1,000クレジット無料、**クレジットカード登録不要** | 検索機能自体がなく、任意の技術名には汎用的に使えない |
+| Structured Outputとの併用 | tool(検索)とresponse_schemaの併用可否が公式ドキュメント上明確でない | 検索とLLM呼び出しが完全に別ステップなので影響なし | 該当なし |
+| claim単位の根拠追跡 | 回答全体への`url_citation`(文字範囲)を私たちの構造に変換し直す必要がある | 検索結果の各itemに直接IDを振れるため、根拠付けの構造を完全にコントロールできる | 自由に設計できるが検索自体ができない |
+| 実装の単純さ | Google内部の挙動がブラックボックス | 検索結果に本文が含まれ、自前のHTML解析が不要 | HTML取得・本文抽出を自作する必要がある |
+
+**採用理由**: クレジットカード登録が不要な無料枠があり、検索とLLM呼び出しを
+完全に分離できるため、Phase 2で作ったStructured Output実装に一切手を入れずに
+拡張できました。根拠付けの構造(どの主張がどの情報源に基づくか)を、Google内蔵
+Groundingの複雑な形式に頼らず、私たちが完全にコントロールできる形で設計できる
+点も決め手になりました。
+
+Brave Search APIも検討しましたが、2026年2月に無料枠が廃止されクレジットカード
+登録必須の従量課金のみになったため、今回は除外しました。
+
+### コスト・複雑さを抑えるための実装上の工夫
+
+- `search_depth="basic"`を明示し、`auto_parameters=False`にしています。
+  Tavilyの`auto_parameters`を有効にしたままだと、検索内容によっては
+  勝手に`search_depth="advanced"`(2クレジット消費)に昇格することがあるため、
+  明示的に`basic`(1クレジット消費)へ固定しています。
+- `max_results=3`で、item_a・item_bそれぞれ上位3件までに制限しています
+  (1 Researchあたり最大6件の情報源、最大6クレジット消費)。
+- `include_raw_content="text"`で、ページの実際の本文(プレーンテキスト)を
+  取得しています。これはLLMに自由に引用文を生成させず、Evidence Viewerで
+  表示する根拠本文を「実際にWeb上にあったテキスト」にするためです
+  (詳細は次のセクション参照)。
+
 ## Structured Output
 
 LLMの自由文をそのまま保存せず、Pydanticスキーマ(`app/services/llm_schemas.py`)で
@@ -246,7 +318,9 @@ LLMの自由文をそのまま保存せず、Pydanticスキーマ(`app/services/
       "item_b_summary": "...",
       "item_a_score": 5,
       "item_b_score": 4,
-      "winner": "item_a"
+      "winner": "item_a",
+      "item_a_source_ids": [1, 3],
+      "item_b_source_ids": [2]
     }
   ]
 }
@@ -259,6 +333,24 @@ Frontend側で`research.item_a`/`item_b`に読み替えます。
 
 `score`(1〜5)は採用しています。実装コストがほぼゼロな一方、比較表での視覚的な
 優劣表示や将来のAI Evaluation(Comparison Completeness等)の材料になるためです。
+
+### Phase 3で追加した `item_a_source_ids` / `item_b_source_ids`
+
+**根拠本文(evidence_text)そのものはLLMに生成させません。** LLMが担うのは
+「提供した情報源のうち、どれを根拠にしたか(ID)」の選択だけです。実際に
+Evidence Viewerで表示する本文は、Tavily APIが実際に取得したページの内容
+(`sources.content`)をbackend側でそのまま複製したものです。
+
+理由: LLMに「引用文」まで自由生成させると、実際には存在しない文章を
+もっともらしく作り出してしまうリスク(ハルシネーション)があります。
+「どのIDを参照したか」という選択だけに役割を絞ることで、Evidence Viewerに
+表示される文章は必ず実在するWebページの内容になることを保証しています。
+
+`source_id`はLLMの応答を受け取った後、**backend側で必ず実在するsourceか
+検証**しています(`research_runner.py`)。存在しないIDが返ってきた場合は
+Evidenceを作らず無視します(LLMが指定していないsourceを勝手に関連付けることも
+しません)。根拠が見つからない比較軸は`evidence`が0件になりますが、これは
+エラーではなく正常な状態として扱います(無理に根拠をでっち上げさせないため)。
 
 ## 設計上の判断メモ
 
@@ -319,19 +411,26 @@ Research処理(LLM呼び出し・比較生成)はFastAPIの`BackgroundTasks`で�
 
 - `.env` / `.env.local` はGit管理対象外です(`.gitignore`参照)。
 - `.env.example` / `.env.local.example` には変数名のみを記載しています。
-- `GEMINI_API_KEY`を含む秘密情報は、コード・ログ・README・commitのいずれにも
-  実際の値を書き込みません。
+- `GEMINI_API_KEY` / `TAVILY_API_KEY`を含む秘密情報は、コード・ログ・README・
+  commitのいずれにも実際の値を書き込みません。
+- Gemini APIおよびTavily APIのエラー発生時、生のレスポンス本文はFrontendへ
+  返さず、HTTPステータスに応じた定型メッセージのみを返します
+  (`research_runner.py`のエラーハンドリング参照)。
 
-## 既知の制限 (Phase 2時点)
+## 既知の制限 (Phase 3時点)
 
-- 比較結果は外部情報源によるGroundingがされていない(冒頭の注意書き参照)。
-- Web検索・Source取得・Evidence・Citationは未実装(Phase 3で追加予定)。
+- LLMの回答が情報源の内容を完全に正確に要約している保証はない
+  (Evidence Viewerで元の情報源を必ず確認する設計にしている)。
+- 情報源の取得は「{技術名} 公式ドキュメント」というクエリでの検索に頼っており、
+  特定ドメインをホワイトリスト指定するような厳密な「公式サイト限定」はしていない
+  (任意の技術名に汎用的に対応するため)。
 - AI Evaluation、History画面、Authentication、Cloud deploymentは未実装。
 - `BackgroundTasks`はdurableなジョブキューではない(上記参照)。
 
-## Phase 3に向けて
+## Phase 4に向けて
 
-Web Search API(候補: Tavily, Brave Search API等)で取得した情報を`sources`
-テーブルに保存し、LLMにはその情報を踏まえて比較させる(Grounding)。各claimに
-対応する`evidences`テーブルを追加し、Evidence Viewer画面でSource
-title/URL/該当箇所を確認できるようにする、という流れを予定しています。
+- AI Evaluation: Structured Output Success Rate、Citation/Evidence
+  Correctness、Comparison Completeness等の評価指標を10〜20件程度の
+  Evaluation Setで測定する。
+- History画面: 過去のResearch一覧を表示する。
+- Cloud deployment: 現状はローカル実行のみのため、デプロイ手順を整備する。
