@@ -10,6 +10,7 @@ from google.genai import errors as genai_errors
 
 from app.services.llm_schemas import ComparisonReportResult
 from app.services.search_client import SearchResultItem
+from conftest import make_genai_api_error
 
 VALID_PAYLOAD = {
     "item_a": "FastAPI",
@@ -238,8 +239,8 @@ def test_research_fails_on_authentication_error(client, monkeypatch):
     _mock_search(monkeypatch)
 
     def _unauthorized(**kwargs):
-        raise genai_errors.ClientError(
-            401, {"error": {"message": "API key not valid", "status": "UNAUTHENTICATED"}}
+        raise make_genai_api_error(
+            genai_errors.ClientError, 401, "API key not valid", "UNAUTHENTICATED"
         )
 
     monkeypatch.setattr(

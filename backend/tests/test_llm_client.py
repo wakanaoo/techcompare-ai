@@ -12,6 +12,7 @@ from google.genai import errors as genai_errors
 
 from app.services.llm_client import generate_comparison
 from app.services.llm_schemas import ComparisonReportResult
+from conftest import make_genai_api_error
 
 
 def _valid_response():
@@ -83,8 +84,8 @@ def _call_generate_comparison():
 
 
 def test_retries_on_server_error_then_succeeds(monkeypatch):
-    fake_503 = genai_errors.ServerError(
-        503, {"error": {"message": "overloaded", "status": "UNAVAILABLE"}}
+    fake_503 = make_genai_api_error(
+        genai_errors.ServerError, 503, "overloaded", "UNAVAILABLE"
     )
     fake_models = _FakeModels([fake_503, _valid_response()])
     sleep_calls: list[float] = []
@@ -99,8 +100,8 @@ def test_retries_on_server_error_then_succeeds(monkeypatch):
 
 
 def test_retries_on_rate_limit_429_then_succeeds(monkeypatch):
-    fake_429 = genai_errors.ClientError(
-        429, {"error": {"message": "rate limited", "status": "RESOURCE_EXHAUSTED"}}
+    fake_429 = make_genai_api_error(
+        genai_errors.ClientError, 429, "rate limited", "RESOURCE_EXHAUSTED"
     )
     fake_models = _FakeModels([fake_429, _valid_response()])
     _patch_client(monkeypatch, fake_models)
@@ -112,8 +113,8 @@ def test_retries_on_rate_limit_429_then_succeeds(monkeypatch):
 
 
 def test_does_not_retry_on_authentication_error(monkeypatch):
-    fake_401 = genai_errors.ClientError(
-        401, {"error": {"message": "invalid api key", "status": "UNAUTHENTICATED"}}
+    fake_401 = make_genai_api_error(
+        genai_errors.ClientError, 401, "invalid api key", "UNAUTHENTICATED"
     )
     fake_models = _FakeModels([fake_401])
     _patch_client(monkeypatch, fake_models)
@@ -126,8 +127,8 @@ def test_does_not_retry_on_authentication_error(monkeypatch):
 
 
 def test_does_not_retry_on_bad_request(monkeypatch):
-    fake_400 = genai_errors.ClientError(
-        400, {"error": {"message": "bad request", "status": "INVALID_ARGUMENT"}}
+    fake_400 = make_genai_api_error(
+        genai_errors.ClientError, 400, "bad request", "INVALID_ARGUMENT"
     )
     fake_models = _FakeModels([fake_400])
     _patch_client(monkeypatch, fake_models)
@@ -139,8 +140,8 @@ def test_does_not_retry_on_bad_request(monkeypatch):
 
 
 def test_gives_up_after_max_attempts_on_repeated_server_error(monkeypatch):
-    fake_503 = genai_errors.ServerError(
-        503, {"error": {"message": "overloaded", "status": "UNAVAILABLE"}}
+    fake_503 = make_genai_api_error(
+        genai_errors.ServerError, 503, "overloaded", "UNAVAILABLE"
     )
     # 3回連続で503(初回+retry2回すべて失敗)。
     fake_models = _FakeModels([fake_503, fake_503, fake_503])
