@@ -30,6 +30,20 @@ def client():
         yield test_client
 
 
+@pytest.fixture(autouse=True)
+def _disable_gemini_pacing_by_default(monkeypatch):
+    """Phase 4.1で追加したGemini呼び出し間のペース管理(pace_gemini_request）は、
+    テストで実時間のsleepを起こさないよう既定で無効化(間隔0)しておく。
+
+    pace_gemini_request()自体の挙動を検証したいテストは、そのテスト内で
+    `settings.gemini_min_request_interval_seconds` を明示的に上書きすればよい
+    (monkeypatchは後勝ちで、どちらもテスト終了時に元に戻る)。
+    """
+    monkeypatch.setattr(
+        "app.services.llm_client.settings.gemini_min_request_interval_seconds", 0
+    )
+
+
 def make_genai_api_error(error_cls, status_code, message, status):
     """テスト用に genai_errors.ClientError/ServerError を組み立てるhelper。
 

@@ -427,10 +427,168 @@ Research処理(LLM呼び出し・比較生成)はFastAPIの`BackgroundTasks`で�
 - AI Evaluation、History画面、Authentication、Cloud deploymentは未実装。
 - `BackgroundTasks`はdurableなジョブキューではない(上記参照)。
 
-## Phase 4に向けて
+## Phase 4: AI Evaluation
 
-- AI Evaluation: Structured Output Success Rate、Citation/Evidence
-  Correctness、Comparison Completeness等の評価指標を10〜20件程度の
-  Evaluation Setで測定する。
+`backend/evaluation/` に実装。本番コード(`app/`配下)は一切変更せず、
+`app.services.research_runner.run_research()` を外側から呼び出して評価する
+harness(評価用スクリプト群)という位置づけ。
+
+### 設計方針
+
+- 固定Evaluation Set 15件(`evaluation/dataset.py`)を、本番と全く同じ
+  `run_research()` に通す。
+- **ルールベースmetrics**(15件全件、追加のLLM呼び出し不要)は、
+  DBに保存された`Research`/`Comparison`/`Evidence`/`Source`だけから
+  機械的に計算する(`evaluation/metrics.py`)。
+- **LLM Judgeによるsemantic metrics**は、15件のうち代表5件
+  (`JUDGE_SAMPLE_CASE_IDS`)についてのみ、1ケース1回のGemini呼び出しで
+  measureする(`evaluation/judge.py`)。文章の意味理解が必要な軸だけを
+  少数サンプルのLLM Judgeで補完し、それ以外はルールベースで済ませる
+  ことで、Judge呼び出し回数を最小限(5回)に抑えている。
+- Evaluation Setの各ケース(item_a/item_b/goal/criteria)は「ケースの
+  多様性を作るための設計」であり、期待winnerをground truthとした
+  accuracy計算はしない(技術選定はgoal/criteria次第で変わるため)。
+
+### metrics(15件全件): Reliability / Answer-quality
+
+metricsは2種類に明確に分けている(`evaluation/metrics.py`)。failedケースを
+0点としてAnswer-quality側の平均に混ぜないためで、これはFull Evaluation
+Run #1で実際に発生していた不具合(後述)を踏まえた整理。
+
+**Reliability metrics**(分母は実行した全ケース。パイプラインが完走したか):
+
+| Metric | 定義 |
+|---|---|
+| Research Completion Rate | `status=="completed"`の割合(Web検索・LLM呼び出し・schema validationいずれかの失敗も含む、パイプライン全体の完走率) |
+| API failure count by type | failedケースの`error_message`から分類した失敗種別ごとの件数(例: `llm_api_error_429`) |
+| Latency | `updated_at - created_at`(秒)の平均/中央値/最大 |
+
+**Answer-quality metrics**(分母はcompletedケースのみ。failedは含めない):
+
+| Metric | 定義 |
+|---|---|
+| Comparison Completeness Rate | 返ってきたComparison件数が要求criteria数と一致する割合 |
+| Evidence Coverage Rate | (criterion × side)の組のうちEvidenceが1件以上ある割合 |
+| Source Utilization Rate | 取得したSourceのうちEvidenceで引用された割合 |
+| Recommendation Consistency | 各criterionのComparison.winner多数決とRecommendation.winnerの整合率(多数決が拮抗しているケースは判定対象外) |
+
+「LLMが不正なsource_idを何個生成したか」は測定対象にしていない
+(除去ロジック自体は`tests/test_research.py`の既存unit testで担保済みで、
+評価としての価値が低いと判断したため)。
+
+### LLM Judge metrics(代表5件、Gemini呼び出し最大5回)
+
+1ケース1回のstructured output呼び出しの中で、その回に含まれる
+全(criterion × side)claimをまとめて判定する。Judgeが実際に成功した
+ケースのclaimsだけを分母にする(Answer-quality metricsの一部):
+
+- **has_evidence=true(Evidence Correctness)**: 実際のComparisonの
+  `item_a_summary`/`item_b_summary`が、紐づくEvidence本文(=Source.content)
+  によってどれだけ裏付けられているか(supported / partially_supported / unsupported)。
+  LLM-as-a-Judgeによる主観的な判定であり、正解ラベルに基づく
+  accuracyではない。
+- **has_evidence=false(Unsupported Claim)**: 引用元が無いにも関わらず
+  summaryが根拠なく断定的な主張をしていないか。
+
+1ケースのJudge失敗(一時的なAPIエラー等)でEvaluation全体は止めない
+(`run_eval.py`が例外を捕捉し、失敗ケースとして記録した上で次のケースへ
+進む)。
+
+### Gemini API使用量
+
+文字数からの概算はせず、`GenerateContentResponse.usage_metadata`
+(prompt_token_count / candidates_token_count / total_token_count)を
+実際のAPI呼び出しの戻り値からそのまま読み取る
+(`evaluation/usage_capture.py`)。本番コードは変更せず、評価スクリプト
+実行中だけ`genai.Client`を薄いラッパーに差し替えて計測する。
+`call_count`は**usage_metadataを取得できた成功レスポンス数**であり、
+429/503等で失敗したattemptを含む全試行回数ではない点に注意。
+
+### Phase 4.1: rate-limit resilience
+
+Full Evaluation Run #1(15ケース連続実行)でGemini APIの429(Too Many
+Requests)が多発したことを受け、`app/services/llm_client.py`に以下を追加
+(Redis/Celery等の新規インフラは使わず、単一プロセス内で完結):
+
+- `pace_gemini_request()`: Gemini APIへの連続リクエストの間に、Settings
+  経由で調整可能な最小間隔(既定4秒)を空ける。comparison生成
+  (本番コード)とLLM Judge(`evaluation/judge.py`)は同じGemini API利用
+  とみなし、同じペース管理を共有する。
+- 429/503のretry待機時間は、レスポンスにRetry-Afterヘッダがあれば
+  それを優先し、無ければ指数バックオフ+jitterで計算する
+  (`_compute_backoff_seconds()`)。400/401/403/404等はretryしない
+  (既存方針を維持)。
+
+### Evaluation結果: Run #1(Baseline)と Run #2(rate-limit resilience改善後)
+
+| Reliability | Run #1(Baseline) | Run #2 |
+|---|---|---|
+| Research Completion Rate | 46.7%(7/15) | **100%(15/15)** |
+| 失敗種別 | `llm_api_error_429` × 8 | なし |
+| Latency mean / p50 / max | 3.49s / 3.65s / 5.28s | 3.74s / 3.63s / 5.26s |
+| Gemini comparison-generation 成功レスポンス数 | 7 | 15 |
+| Gemini Judge requested/succeeded/failed/not-eligible | 5 / 0 / 3 / 2 | 5 / **4** / 1 / 0 |
+
+**この改善(46.7%→100%)は、pacing/backoff/jitterの追加によるpipeline
+reliabilityの改善であり、LLMの回答精度(AI accuracy)が上がったことを
+意味しない。** また、Run #2のcomparison-generation成功レスポンス数が
+リクエストしたケース数(15)と一致していることは「1回で成功した」ことを
+示すが、`call_count`は成功レスポンスの数であり、内部でretryが発生
+しなかったことまでを保証する指標ではない。
+
+| Answer-quality(completedケースのみ) | Run #1 | Run #2 |
+|---|---|---|
+| Comparison Completeness | 1.0 | 1.0 |
+| Evidence Coverage | 0.702 | 0.716 |
+| Source Utilization | 0.548※ | 0.733 |
+| Recommendation Consistency | 0.833 | 0.786 |
+
+※Run #1のBaselineファイルにはPhase 4.1修正前の計算(failedケースを
+0として混入)による値が記録されているため、修正後の計算方法(completed
+ケースのみ)でRun #1のcompleted 7件から再計算した値を掲載している。
+
+LLM Judge(Run #2、Judge成功4/5ケース。Evidence Correctnessは
+LLM-as-a-Judgeによる主観的判定であり、正解ラベルに基づくaccuracyでは
+ない):
+
+- Evidence-present claims(has_evidence=true、母数17件): supported 15件 /
+  partially_supported 2件 / unsupported 0件
+- Evidence-absent claims(has_evidence=false、母数5件): supported
+  (=適切に断定を回避) 5件 / unsupported 0件
+
+Run #1はJudgeが0/5成功(3件API失敗・2件Stage A未完了でnot-eligible)の
+ため、Evidence Correctness/Unsupported Claimのデータ自体を取得できて
+いない。
+
+生のJSON/CSV結果ファイルはGitにコミットしていない
+(`backend/evaluation/results/`は`.gitignore`対象)。
+
+### Evaluationの限界
+
+- Evaluation Setは固定15ケースであり、統計的に十分な標本数とは言えない。
+- LLM Judgeの対象は15件中5件のみ(呼び出し回数を抑えるための設計上の
+  トレードオフ)。
+- LLM Judge自体がLLM-as-a-Judge方式であり、判定そのものにLLMの
+  バイアス・誤りが含まれうる(人手によるgold-standard評価ではない)。
+
+### 実行方法
+
+```bash
+cd backend && source venv/bin/activate
+pytest                       # evaluation配下のmock/unit testも含めて確認
+python -m evaluation.run_eval  # 実API(Tavily/Gemini)を使った本実行
+```
+
+本実行は、Evaluation Set全件分のTavily/Gemini API呼び出しを実際に行う
+(既定: Tavily 30回、Gemini 最大20回=比較生成15+Judge5)。結果は
+`backend/evaluation/results/run_<timestamp>.json` と、
+`..._cases.csv` / `..._judge_claims.csv` に保存される
+(生成物なので`.gitignore`でコミット対象外にしている)。
+
+2026年9月時点で、Baseline(Run #1)とrate-limit resilience改善後
+(Run #2)の2回、実APIを使った本実行を完了している(上記結果参照)。
+
+### 今後(Phase 4スコープ外)
+
 - History画面: 過去のResearch一覧を表示する。
 - Cloud deployment: 現状はローカル実行のみのため、デプロイ手順を整備する。

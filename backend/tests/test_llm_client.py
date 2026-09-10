@@ -7,9 +7,13 @@
 ことを確認する。time.sleepもmockして、テストを実時間で待たせない。
 """
 
+import json
+
 import pytest
+import requests
 from google.genai import errors as genai_errors
 
+import app.services.llm_client as llm_client_module
 from app.services.llm_client import generate_comparison
 from app.services.llm_schemas import ComparisonReportResult
 from conftest import make_genai_api_error
@@ -64,13 +68,18 @@ class _FakeClient:
 
 
 def _patch_client(monkeypatch, fake_models, sleep_calls=None):
+    # genai.Client(api_key=...)のように呼ばれても受け取れるようにしておく
+    # (実際の呼び出し方法はtest_generate_comparison_passes_gemini_api_key...
+    # 側で別途検証する)。
     monkeypatch.setattr(
-        "app.services.llm_client.genai.Client", lambda: _FakeClient(fake_models)
+        "app.services.llm_client.genai.Client", lambda **kwargs: _FakeClient(fake_models)
     )
     monkeypatch.setattr(
         "app.services.llm_client.time.sleep",
         lambda seconds: (sleep_calls.append(seconds) if sleep_calls is not None else None),
     )
+    # jitterをテストで無効化し、backoffの具体的な秒数を決定的に検証できるようにする。
+    monkeypatch.setattr("app.services.llm_client.random.uniform", lambda a, b: 0)
 
 
 def _call_generate_comparison():
@@ -154,3 +163,155 @@ def test_gives_up_after_max_attempts_on_repeated_server_error(monkeypatch):
     assert fake_models.call_count == 3
     # 1回目の失敗後1.0秒、2回目の失敗後2.0秒待機し、3回目(最後)は待たずに諦める。
     assert sleep_calls == [1.0, 2.0]
+
+
+def test_generate_comparison_passes_gemini_api_key_from_settings_explicitly(monkeypatch):
+    """genai.Client()が、SDKバージョンによって挙動が変わりうる環境変数の
+    自動探索(GOOGLE_API_KEY/GEMINI_API_KEY)に頼らず、Settings経由で読んだ
+    GEMINI_API_KEYを`api_key=`として明示的に渡していることを確認する
+    (dry runで発覚した、SDKが参照する環境変数名との食い違いの回帰テスト)。
+    """
+    captured_kwargs: dict = {}
+
+    def _fake_client_factory(**kwargs):
+        captured_kwargs.update(kwargs)
+        return _FakeClient(_FakeModels([_valid_response()]))
+
+    monkeypatch.setattr("app.services.llm_client.genai.Client", _fake_client_factory)
+    # 実際のキー値は使わず、テスト専用のダミー値で「Settingsの値がそのまま
+    # 渡されているか」だけを検証する。
+    monkeypatch.setattr(
+        "app.services.llm_client.settings.gemini_api_key", "dummy-test-api-key"
+    )
+
+    _call_generate_comparison()
+
+    assert captured_kwargs == {"api_key": "dummy-test-api-key"}
+
+
+# --- Phase 4.1: rate-limit resilience(backoff/jitter/Retry-After/pacing) ---
+
+
+def test_backoff_increases_exponentially_across_attempts(monkeypatch):
+    monkeypatch.setattr(llm_client_module.random, "uniform", lambda a, b: 0)
+    fake_503 = make_genai_api_error(
+        genai_errors.ServerError, 503, "overloaded", "UNAVAILABLE"
+    )
+
+    first = llm_client_module._compute_backoff_seconds(0, fake_503)
+    second = llm_client_module._compute_backoff_seconds(1, fake_503)
+
+    assert first == 1.0  # base(1.0) * 2**0
+    assert second == 2.0  # base(1.0) * 2**1
+    assert second > first
+
+
+def test_backoff_includes_jitter(monkeypatch):
+    monkeypatch.setattr(llm_client_module.random, "uniform", lambda a, b: 0.3)
+    fake_503 = make_genai_api_error(
+        genai_errors.ServerError, 503, "overloaded", "UNAVAILABLE"
+    )
+
+    seconds = llm_client_module._compute_backoff_seconds(0, fake_503)
+
+    assert seconds == pytest.approx(1.3)  # base(1.0) + jitter(0.3)
+
+
+def test_backoff_prefers_retry_after_header_when_present(monkeypatch):
+    monkeypatch.setattr(llm_client_module.random, "uniform", lambda a, b: 0.3)
+    response = requests.Response()
+    response.status_code = 429
+    response._content = json.dumps(
+        {"error": {"message": "rate limited", "status": "RESOURCE_EXHAUSTED"}}
+    ).encode("utf-8")
+    response.headers["Retry-After"] = "7"
+    fake_429 = genai_errors.ClientError(429, response)
+
+    seconds = llm_client_module._compute_backoff_seconds(0, fake_429)
+
+    # Retry-Afterが取得できる場合は、指数バックオフ+jitterより優先する。
+    assert seconds == 7.0
+
+
+def test_backoff_falls_back_to_exponential_when_no_retry_after_header(monkeypatch):
+    monkeypatch.setattr(llm_client_module.random, "uniform", lambda a, b: 0)
+    fake_503 = make_genai_api_error(
+        genai_errors.ServerError, 503, "overloaded", "UNAVAILABLE"
+    )
+
+    seconds = llm_client_module._compute_backoff_seconds(0, fake_503)
+
+    assert seconds == 1.0
+
+
+class _FakeClock:
+    """time.monotonic()の代わりに使う、手動で進められるfakeクロック。"""
+
+    def __init__(self, start: float = 0.0):
+        self._now = start
+
+    def advance(self, seconds: float) -> None:
+        self._now += seconds
+
+    def __call__(self) -> float:
+        return self._now
+
+
+def test_pace_gemini_request_waits_for_configured_minimum_interval(monkeypatch):
+    monkeypatch.setattr(llm_client_module, "_last_gemini_request_at", None)
+    monkeypatch.setattr(
+        llm_client_module.settings, "gemini_min_request_interval_seconds", 5.0
+    )
+    clock = _FakeClock(start=100.0)
+    monkeypatch.setattr(llm_client_module.time, "monotonic", clock)
+    sleep_calls: list[float] = []
+    monkeypatch.setattr(
+        llm_client_module.time,
+        "sleep",
+        lambda seconds: (sleep_calls.append(seconds), clock.advance(seconds)),
+    )
+
+    llm_client_module.pace_gemini_request()  # 初回は待機しない
+    assert sleep_calls == []
+
+    clock.advance(1.0)  # 1秒しか経っていない(5秒間隔に満たない)
+    llm_client_module.pace_gemini_request()
+
+    assert sleep_calls == [pytest.approx(4.0)]  # 5.0 - 1.0
+
+
+def test_pace_gemini_request_skips_wait_when_interval_already_elapsed(monkeypatch):
+    monkeypatch.setattr(llm_client_module, "_last_gemini_request_at", None)
+    monkeypatch.setattr(
+        llm_client_module.settings, "gemini_min_request_interval_seconds", 5.0
+    )
+    clock = _FakeClock(start=100.0)
+    monkeypatch.setattr(llm_client_module.time, "monotonic", clock)
+    sleep_calls: list[float] = []
+    monkeypatch.setattr(
+        llm_client_module.time,
+        "sleep",
+        lambda seconds: (sleep_calls.append(seconds), clock.advance(seconds)),
+    )
+
+    llm_client_module.pace_gemini_request()
+    clock.advance(10.0)  # 間隔(5秒)より十分経過している
+    llm_client_module.pace_gemini_request()
+
+    assert sleep_calls == []
+
+
+def test_pace_gemini_request_is_noop_when_min_interval_is_zero(monkeypatch):
+    monkeypatch.setattr(llm_client_module, "_last_gemini_request_at", None)
+    monkeypatch.setattr(
+        llm_client_module.settings, "gemini_min_request_interval_seconds", 0
+    )
+    clock = _FakeClock(start=100.0)
+    monkeypatch.setattr(llm_client_module.time, "monotonic", clock)
+    sleep_calls: list[float] = []
+    monkeypatch.setattr(llm_client_module.time, "sleep", lambda s: sleep_calls.append(s))
+
+    llm_client_module.pace_gemini_request()
+    llm_client_module.pace_gemini_request()
+
+    assert sleep_calls == []

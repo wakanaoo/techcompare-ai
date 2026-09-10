@@ -10,14 +10,29 @@ LLM呼び出し自体は1回だけ):
 LLMには「提供された情報源に基づいて回答すること」「情報源に記載がなければ
 断定しないこと」を明示し、根拠本文そのものは生成させない
 (根拠となったsourceのIDだけを選ばせる)。
+
+Phase 4.1: rate-limit resilienceについて
+15ケースを連続実行するFull Evaluationで429(Too Many Requests)が多発した
+実測を受けて、以下を追加している(Redis/Celery等の新規インフラは使わず、
+単一プロセス内で完結させる):
+  - pace_gemini_request(): Gemini APIへの連続リクエストの間に、Settings
+    経由で調整可能な最小間隔を空ける。comparison生成(このモジュール)と
+    LLM Judge(evaluation/judge.py)は同じGemini API利用とみなし、
+    このモジュールグローバルな状態を共有してペースを揃える
+    (evaluation/judge.pyから直接importして呼ばれる)。
+  - _compute_backoff_seconds(): 429/503のretry待機時間を、Gemini
+    APIレスポンスにRetry-Afterヘッダがあればそれを優先し、無ければ
+    指数バックオフ+jitterで計算する。
 """
 
+import random
 import time
 
 from google import genai
 from google.genai import errors as genai_errors
 from google.genai import types
 
+from app.core.config import settings
 from app.schemas.criteria import Criterion, CRITERION_LABELS
 from app.services.llm_schemas import ComparisonReportResult
 from app.services.search_client import SearchResultItem
@@ -39,7 +54,6 @@ _PROMPT_CONTENT_MAX_LENGTH = 800
 # 400/401/403/404等、retryしても解決しないエラーは対象外(即座に例外を送出する)。
 # Celery/RQ等の本格的なジョブキューは導入せず、この関数内で完結させている。
 _MAX_ATTEMPTS = 3  # 初回呼び出し + 最大2回のretry
-_RETRY_BACKOFF_SECONDS = 1.0  # 1回目の待機。以降 1s -> 2s と単純に倍にする
 
 
 def _is_retryable_error(exc: Exception) -> bool:
@@ -48,6 +62,64 @@ def _is_retryable_error(exc: Exception) -> bool:
     if isinstance(exc, genai_errors.ClientError) and exc.code == 429:
         return True  # 429: レート制限。少し待てば成功する可能性がある
     return False
+
+
+# --- Gemini APIへのペース管理(comparison生成・LLM Judge共通) ---
+# 同一プロセス内でGeminiへの連続リクエストの間隔を、Settings経由で
+# 調整可能な最小間隔だけ空ける。Redis/Celery等の新規インフラは使わず、
+# モジュールグローバルな「最後にリクエストした時刻」だけで実現する
+# (このMVPは単一プロセス・逐次実行が前提のため、これで十分)。
+_last_gemini_request_at: float | None = None
+
+
+def pace_gemini_request() -> None:
+    """Gemini APIを呼び出す直前に呼ぶ。設定された最小間隔(秒)に満たなければ
+    その分だけ待機する。
+
+    comparison生成(このモジュール)・LLM Judge(evaluation/judge.py)いずれの
+    呼び出しも、ここを通すことで同じGemini API利用としてペースを共有する。
+    """
+    global _last_gemini_request_at
+    min_interval = settings.gemini_min_request_interval_seconds
+    now = time.monotonic()
+    if min_interval > 0 and _last_gemini_request_at is not None:
+        remaining = min_interval - (now - _last_gemini_request_at)
+        if remaining > 0:
+            time.sleep(remaining)
+            now = time.monotonic()
+    _last_gemini_request_at = now
+
+
+def _extract_retry_after_seconds(exc: Exception) -> float | None:
+    """Gemini APIのレスポンスにRetry-After相当のヘッダがあれば、
+    その秒数を返す(無ければNone)。取得できる場合はこちらを優先する。
+    """
+    response = getattr(exc, "response", None)
+    headers = getattr(response, "headers", None)
+    if not headers:
+        return None
+    value = headers.get("Retry-After")
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _compute_backoff_seconds(attempt: int, exc: Exception) -> float:
+    """次のretryまでの待機秒数を決める。
+
+    Retry-Afterヘッダが取得できればそれを優先する。無ければ、
+    Settings経由で調整可能な基準値による指数バックオフ(1s -> 2s -> ...)に
+    jitter(0〜設定値の一様乱数)を加えた値を使う。
+    """
+    retry_after = _extract_retry_after_seconds(exc)
+    if retry_after is not None:
+        return retry_after
+    base = settings.gemini_retry_backoff_base_seconds * (2**attempt)
+    jitter = random.uniform(0, settings.gemini_retry_jitter_max_seconds)
+    return base + jitter
 
 
 def _format_sources(sources: dict[int, SearchResultItem]) -> str:
@@ -121,10 +193,13 @@ def generate_comparison(
     (呼び出し元のresearch_runner.pyでstatus=failedとして処理する。
     生のエラー内容やAPIキーはそちらで露出しないようにサニタイズされる)。
     """
-    client = genai.Client()
+    # SDKの環境変数自動探索(バージョンによってGOOGLE_API_KEY/GEMINI_API_KEYの
+    # どちらを見るか変わりうる)に依存せず、Settings経由で読んだキーを明示的に渡す。
+    client = genai.Client(api_key=settings.gemini_api_key)
     prompt = _build_prompt(item_a, item_b, goal, criteria, sources)
 
     for attempt in range(_MAX_ATTEMPTS):
+        pace_gemini_request()
         try:
             response = client.models.generate_content(
                 model=MODEL,
@@ -139,7 +214,7 @@ def generate_comparison(
             is_last_attempt = attempt == _MAX_ATTEMPTS - 1
             if not _is_retryable_error(exc) or is_last_attempt:
                 raise
-            time.sleep(_RETRY_BACKOFF_SECONDS * (2**attempt))
+            time.sleep(_compute_backoff_seconds(attempt, exc))
 
     result = response.parsed
     if not isinstance(result, ComparisonReportResult):
