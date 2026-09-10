@@ -449,38 +449,48 @@ harness(評価用スクリプト群)という位置づけ。
   多様性を作るための設計」であり、期待winnerをground truthとした
   accuracy計算はしない(技術選定はgoal/criteria次第で変わるため)。
 
-### metrics(15件全件): Reliability / Answer-quality
+### metrics(15件全件): Reliability / Answer Quality
 
 metricsは2種類に明確に分けている(`evaluation/metrics.py`)。failedケースを
-0点としてAnswer-quality側の平均に混ぜないためで、これはFull Evaluation
+0点としてAnswer Quality側の平均に混ぜないためで、これはFull Evaluation
 Run #1で実際に発生していた不具合(後述)を踏まえた整理。
 
-**Reliability metrics**(分母は実行した全ケース。パイプラインが完走したか):
+#### Reliability(分母は実行した全ケース。パイプラインが完走したか)
 
 | Metric | 定義 |
 |---|---|
 | Research Completion Rate | `status=="completed"`の割合(Web検索・LLM呼び出し・schema validationいずれかの失敗も含む、パイプライン全体の完走率) |
 | API failure count by type | failedケースの`error_message`から分類した失敗種別ごとの件数(例: `llm_api_error_429`) |
 | Latency | `updated_at - created_at`(秒)の平均/中央値/最大 |
-
-**Answer-quality metrics**(分母はcompletedケースのみ。failedは含めない):
-
-| Metric | 定義 |
-|---|---|
-| Comparison Completeness Rate | 返ってきたComparison件数が要求criteria数と一致する割合 |
-| Evidence Coverage Rate | (criterion × side)の組のうちEvidenceが1件以上ある割合 |
-| Source Utilization Rate | 取得したSourceのうちEvidenceで引用された割合 |
-| Recommendation Consistency | 各criterionのComparison.winner多数決とRecommendation.winnerの整合率(多数決が拮抗しているケースは判定対象外) |
+| API usage / call counts | Gemini/Tavilyの呼び出し回数、Geminiのtoken使用量(詳細は下記) |
 
 「LLMが不正なsource_idを何個生成したか」は測定対象にしていない
 (除去ロジック自体は`tests/test_research.py`の既存unit testで担保済みで、
 評価としての価値が低いと判断したため)。
 
-### LLM Judge metrics(代表5件、Gemini呼び出し最大5回)
+Gemini API使用量(上表「API usage / call counts」の詳細): 文字数からの
+概算はせず、`GenerateContentResponse.usage_metadata`
+(prompt_token_count / candidates_token_count / total_token_count)を
+実際のAPI呼び出しの戻り値からそのまま読み取る
+(`evaluation/usage_capture.py`)。本番コードは変更せず、評価スクリプト
+実行中だけ`genai.Client`を薄いラッパーに差し替えて計測する。
+`call_count`は**usage_metadataを取得できた成功レスポンス数**であり、
+429/503等で失敗したattemptを含む全試行回数ではない点に注意。
 
-1ケース1回のstructured output呼び出しの中で、その回に含まれる
-全(criterion × side)claimをまとめて判定する。Judgeが実際に成功した
-ケースのclaimsだけを分母にする(Answer-quality metricsの一部):
+#### Answer Quality(分母はcompletedケースのみ。failedは含めない)
+
+| Metric | 定義 |
+|---|---|
+| Comparison Completeness | 返ってきたComparison件数が要求criteria数と一致する割合 |
+| Evidence Coverage | (criterion × side)の組のうちEvidenceが1件以上ある割合 |
+| Source Utilization | 取得したSourceのうちEvidenceで引用された割合 |
+| Recommendation Consistency | 各criterionのComparison.winner多数決とRecommendation.winnerの整合率(多数決が拮抗しているケースは判定対象外) |
+| LLM Judge metrics | 代表5件についてEvidence Correctness / Unsupported Claimを判定する(詳細は下記) |
+
+LLM Judge metrics(上表の詳細。代表5件、Gemini呼び出し最大5回): 1ケース
+1回のstructured output呼び出しの中で、その回に含まれる全(criterion ×
+side)claimをまとめて判定する。Judgeが実際に成功したケースのclaimsだけを
+分母にする:
 
 - **has_evidence=true(Evidence Correctness)**: 実際のComparisonの
   `item_a_summary`/`item_b_summary`が、紐づくEvidence本文(=Source.content)
@@ -493,16 +503,6 @@ Run #1で実際に発生していた不具合(後述)を踏まえた整理。
 1ケースのJudge失敗(一時的なAPIエラー等)でEvaluation全体は止めない
 (`run_eval.py`が例外を捕捉し、失敗ケースとして記録した上で次のケースへ
 進む)。
-
-### Gemini API使用量
-
-文字数からの概算はせず、`GenerateContentResponse.usage_metadata`
-(prompt_token_count / candidates_token_count / total_token_count)を
-実際のAPI呼び出しの戻り値からそのまま読み取る
-(`evaluation/usage_capture.py`)。本番コードは変更せず、評価スクリプト
-実行中だけ`genai.Client`を薄いラッパーに差し替えて計測する。
-`call_count`は**usage_metadataを取得できた成功レスポンス数**であり、
-429/503等で失敗したattemptを含む全試行回数ではない点に注意。
 
 ### Phase 4.1: rate-limit resilience
 
@@ -531,10 +531,10 @@ Requests)が多発したことを受け、`app/services/llm_client.py`に以下�
 
 **この改善(46.7%→100%)は、pacing/backoff/jitterの追加によるpipeline
 reliabilityの改善であり、LLMの回答精度(AI accuracy)が上がったことを
-意味しない。** また、Run #2のcomparison-generation成功レスポンス数が
-リクエストしたケース数(15)と一致していることは「1回で成功した」ことを
-示すが、`call_count`は成功レスポンスの数であり、内部でretryが発生
-しなかったことまでを保証する指標ではない。
+意味しない。** Run #2では15ケースすべてでcomparison-generationの
+successful responseを取得した。ただし`call_count`はusage_metadataを
+取得できた成功レスポンス数であり、失敗attemptを含まないため、各ケースが
+初回attemptで成功したことまでは示さない。
 
 | Answer-quality(completedケースのみ) | Run #1 | Run #2 |
 |---|---|---|
