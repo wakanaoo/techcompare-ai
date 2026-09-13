@@ -31,7 +31,7 @@ from app.models.comparison import Comparison
 from app.models.evidence import Evidence
 from app.models.research import Research
 from app.models.source import Source
-from app.schemas.criteria import CRITERION_LABELS, Criterion
+from app.schemas.criteria import label_for
 from app.services.llm_client import generate_comparison
 from app.services.llm_schemas import ComparisonReportResult
 from app.services.search_client import SearchResultItem, search_technology
@@ -165,9 +165,10 @@ def run_research(research_id: int) -> None:
             comparison = Comparison(
                 research_id=research.id,
                 criterion=item.criterion,
-                # criterion_labelはLLMの自由生成に依存せず、backend側の
-                # 固定マスタ(CRITERION_LABELS)から決定する。
-                criterion_label=CRITERION_LABELS[Criterion(item.criterion)],
+                # criterion_labelはLLMの自由生成に依存せず、backend側で決定する。
+                # 固定候補ならCRITERION_LABELSの日本語ラベル、自由入力の
+                # criterionならその文字列自体をラベルとして使う(label_for参照)。
+                criterion_label=label_for(item.criterion),
                 item_a_summary=item.item_a_summary,
                 item_b_summary=item.item_b_summary,
                 item_a_score=item.item_a_score,
@@ -177,9 +178,9 @@ def run_research(research_id: int) -> None:
             db.add(comparison)
             db.flush()  # comparison.idを確定させる
 
-            for side_label, cited_ids in (
-                (research.item_a, item.item_a_source_ids),
-                (research.item_b, item.item_b_source_ids),
+            for side, side_label, cited_ids in (
+                ("item_a", research.item_a, item.item_a_source_ids),
+                ("item_b", research.item_b, item.item_b_source_ids),
             ):
                 for source_id in cited_ids:
                     source_item = sources_by_id.get(source_id)
@@ -191,7 +192,11 @@ def run_research(research_id: int) -> None:
                         Evidence(
                             comparison_id=comparison.id,
                             source_id=source_id,
-                            claim=f"{side_label}の{CRITERION_LABELS[Criterion(item.criterion)]}について",
+                            # sideは、今このループがitem_a/item_bどちらを
+                            # 処理しているかを明示的に渡す(claim文字列の
+                            # パースには依存しない)。
+                            side=side,
+                            claim=f"{side_label}の{label_for(item.criterion)}について",
                             # 根拠本文はLLMに生成させず、Tavilyが実際に
                             # 取得したSource.contentをそのまま複製する。
                             evidence_text=source_item.content,

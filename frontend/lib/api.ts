@@ -7,6 +7,7 @@ const API_BASE_URL =
 
 export type ResearchStatus = "pending" | "researching" | "completed" | "failed";
 export type Winner = "item_a" | "item_b" | "tie";
+export type Side = "item_a" | "item_b";
 
 export interface Research {
   id: number;
@@ -38,6 +39,8 @@ export interface EvidenceSummary {
   source_id: number;
   source_title: string;
   source_url: string;
+  // このEvidenceがitem_a/item_bどちらの主張を裏付けるものか。
+  side: Side;
   claim: string;
   evidence_text: string;
 }
@@ -72,6 +75,9 @@ export interface ResearchResult {
 
 export interface EvidenceDetail {
   id: number;
+  side: Side;
+  // sideに対応する実際の技術名(例: "FastAPI")。
+  side_label: string;
   claim: string;
   evidence_text: string;
   source_title: string;

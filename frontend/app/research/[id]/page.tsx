@@ -3,15 +3,30 @@
 import { useEffect, useRef, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 
-import { getResearch, type Research } from "@/lib/api";
+import { Alert } from "@/components/Alert";
+import { Button } from "@/components/Button";
+import { Card } from "@/components/Card";
+import { PageContainer } from "@/components/PageContainer";
+import { Spinner } from "@/components/Spinner";
+import { StatusTimeline } from "@/components/StatusTimeline";
+import { useElapsedSeconds } from "@/hooks/useElapsedSeconds";
+import { createResearch, getResearch, type Research } from "@/lib/api";
+import { getFriendlyErrorMessage } from "@/lib/errorMessages";
 
 const POLL_INTERVAL_MS = 2000;
 
-const STATUS_LABEL: Record<Research["status"], string> = {
-  pending: "○ 待機中",
-  researching: "● 比較を生成中...",
-  completed: "✓ 完了",
-  failed: "✗ 失敗",
+// completed検知後、router.push()による自動遷移が何らかの理由で完了しない
+// ケース(例: dev serverのHMR干渉、ネットワークの瞬断)に備えて、この秒数
+// 経ってもこの画面に残っていた場合だけ、手動遷移用の「View Report」ボタンを
+// 表示する。正常に即時遷移できた場合は、このタイマーが発火する前に
+// コンポーネント自体がunmountされるため、fallback UIは実質見えない。
+const NAVIGATION_FALLBACK_DELAY_MS = 4000;
+
+const STATUS_DESCRIPTION: Record<Research["status"], string> = {
+  pending: "調査を開始しています。",
+  researching: "Web情報を収集・分析し、比較結果を生成しています。",
+  completed: "調査完了。結果画面に移動します…",
+  failed: "調査を完了できませんでした。",
 };
 
 export default function ResearchProgressPage() {
@@ -20,11 +35,33 @@ export default function ResearchProgressPage() {
   const [research, setResearch] = useState<Research | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
+  const [isRetrying, setIsRetrying] = useState(false);
+  const [retryError, setRetryError] = useState<string | null>(null);
+  const [showViewReportFallback, setShowViewReportFallback] = useState(false);
   const hasRedirected = useRef(false);
+
+  // 別のResearch ID(例: 「もう一度試す」からの遷移)に切り替わった際、前の
+  // Researchの内容が一瞬表示され続けないよう、render中に状態をリセットする。
+  // (useEffect内でのsetStateではなく、Reactが推奨する「propが変わったら
+  // render中にstateを調整する」パターン: https://react.dev/learn/you-might-not-need-an-effect)
+  const [trackedId, setTrackedId] = useState(params.id);
+  if (params.id !== trackedId) {
+    setTrackedId(params.id);
+    setResearch(null);
+    setError(null);
+    setIsLoading(true);
+    setRetryError(null);
+    setShowViewReportFallback(false);
+  }
 
   useEffect(() => {
     let cancelled = false;
-    let timer: ReturnType<typeof setTimeout> | undefined;
+    let pollTimer: ReturnType<typeof setTimeout> | undefined;
+    let fallbackTimer: ReturnType<typeof setTimeout> | undefined;
+
+    // refの初期化はrender中ではなくeffect内で行う(params.id変更のたびに
+    // このeffectも再実行されるため、ここでリセットすれば十分)。
+    hasRedirected.current = false;
 
     async function poll() {
       try {
@@ -38,6 +75,11 @@ export default function ResearchProgressPage() {
           if (!hasRedirected.current) {
             hasRedirected.current = true;
             router.push(`/research/${params.id}/result`);
+            // 自動遷移が完了しない場合だけのfallback(通常はunmountにより
+            // このタイマーが発火する前にクリーンアップされる)。
+            fallbackTimer = setTimeout(() => {
+              if (!cancelled) setShowViewReportFallback(true);
+            }, NAVIGATION_FALLBACK_DELAY_MS);
           }
           return;
         }
@@ -47,7 +89,7 @@ export default function ResearchProgressPage() {
         }
 
         // pending / researching の間は数秒おきに再取得する。
-        timer = setTimeout(poll, POLL_INTERVAL_MS);
+        pollTimer = setTimeout(poll, POLL_INTERVAL_MS);
       } catch (err) {
         if (!cancelled) {
           setError(
@@ -62,43 +104,163 @@ export default function ResearchProgressPage() {
 
     return () => {
       cancelled = true;
-      if (timer) clearTimeout(timer);
+      if (pollTimer) clearTimeout(pollTimer);
+      if (fallbackTimer) clearTimeout(fallbackTimer);
     };
   }, [params.id, router]);
 
-  return (
-    <main style={{ maxWidth: 480, margin: "0 auto", padding: "2rem 1rem" }}>
-      <h1>Research Progress</h1>
+  const isActive = research?.status === "pending" || research?.status === "researching";
+  const elapsedSeconds = useElapsedSeconds(research?.created_at, isActive);
 
-      {isLoading && <p>読み込み中...</p>}
-      {error && <p style={{ color: "crimson" }}>{error}</p>}
+  async function handleRetry() {
+    if (!research || isRetrying) return; // 二重送信防止
+
+    setIsRetrying(true);
+    setRetryError(null);
+
+    try {
+      const newResearch = await createResearch({
+        item_a: research.item_a,
+        item_b: research.item_b,
+        goal: research.goal,
+        criteria: research.criteria,
+      });
+      router.push(`/research/${newResearch.id}`);
+    } catch (err) {
+      setRetryError(
+        err instanceof Error ? err.message : "再試行に失敗しました",
+      );
+      setIsRetrying(false);
+    }
+  }
+
+  const friendlyError =
+    research?.status === "failed"
+      ? getFriendlyErrorMessage(research.error_message)
+      : null;
+
+  return (
+    <PageContainer maxWidth={560}>
+      <h1 style={{ marginBottom: "var(--space-5)" }}>Research Progress</h1>
+
+      {isLoading && (
+        <Card>
+          <p style={{ color: "var(--color-text-muted)" }}>読み込み中…</p>
+        </Card>
+      )}
+
+      {error && (
+        <Alert tone="danger" title="読み込みに失敗しました" details={error} />
+      )}
 
       {research && (
-        <>
-          <dl>
-            <dt>Research ID</dt>
-            <dd>{research.id}</dd>
+        <Card>
+          <p style={{ fontWeight: 700, fontSize: "1.05rem" }}>
+            {research.item_a} vs {research.item_b}
+          </p>
+          <p
+            style={{
+              color: "var(--color-text-muted)",
+              marginTop: "var(--space-1)",
+              marginBottom: "var(--space-5)",
+            }}
+          >
+            {research.goal}
+          </p>
 
-            <dt>技術A</dt>
-            <dd>{research.item_a}</dd>
+          <StatusTimeline status={research.status} />
 
-            <dt>技術B</dt>
-            <dd>{research.item_b}</dd>
+          <div
+            style={{
+              marginTop: "var(--space-5)",
+              paddingTop: "var(--space-4)",
+              borderTop: "1px solid var(--color-border)",
+            }}
+          >
+            {research.status === "researching" && (
+              <div style={{ display: "flex", alignItems: "center", gap: "var(--space-2)" }}>
+                <Spinner label="処理中" />
+                <p>{STATUS_DESCRIPTION.researching}</p>
+              </div>
+            )}
 
-            <dt>目的</dt>
-            <dd>{research.goal}</dd>
+            {research.status === "pending" && <p>{STATUS_DESCRIPTION.pending}</p>}
 
-            <dt>Status</dt>
-            <dd>{STATUS_LABEL[research.status]}</dd>
-          </dl>
+            {research.status === "completed" &&
+              (showViewReportFallback ? (
+                <div>
+                  <p style={{ fontWeight: 700 }}>Research Complete</p>
+                  <p
+                    style={{
+                      color: "var(--color-text-muted)",
+                      marginTop: "var(--space-1)",
+                    }}
+                  >
+                    レポートを準備しています…
+                  </p>
+                  <div style={{ marginTop: "var(--space-3)" }}>
+                    <Button href={`/research/${params.id}/result`}>View Report →</Button>
+                  </div>
+                </div>
+              ) : (
+                <p>{STATUS_DESCRIPTION.completed}</p>
+              ))}
 
-          {research.status === "failed" && (
-            <p style={{ color: "crimson", marginTop: "1rem" }}>
-              エラー: {research.error_message ?? "不明なエラーが発生しました"}
-            </p>
+            {isActive && (
+              <p
+                style={{
+                  marginTop: "var(--space-2)",
+                  fontSize: "0.85rem",
+                  color: "var(--color-text-subtle)",
+                }}
+              >
+                完了まで数十秒かかることがあります。このままお待ちください。
+                <br />
+                調査開始からの経過時間: {elapsedSeconds}秒
+              </p>
+            )}
+          </div>
+
+          {research.status === "failed" && friendlyError && (
+            <div style={{ marginTop: "var(--space-4)" }}>
+              <Alert
+                tone="danger"
+                title={friendlyError.headline}
+                description="この調査は終了しました。"
+                details={friendlyError.detail}
+              />
+
+              {retryError && (
+                <p
+                  style={{
+                    color: "var(--color-danger)",
+                    marginTop: "var(--space-3)",
+                    fontSize: "0.85rem",
+                  }}
+                >
+                  再試行にも失敗しました: {retryError}
+                </p>
+              )}
+
+              <div
+                style={{
+                  display: "flex",
+                  gap: "var(--space-3)",
+                  marginTop: "var(--space-4)",
+                  flexWrap: "wrap",
+                }}
+              >
+                <Button onClick={handleRetry} loading={isRetrying}>
+                  同じ条件でもう一度試す
+                </Button>
+                <Button href="/" variant="secondary">
+                  入力画面に戻る
+                </Button>
+              </div>
+            </div>
           )}
-        </>
+        </Card>
       )}
-    </main>
+    </PageContainer>
   );
 }

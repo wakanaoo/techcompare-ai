@@ -33,7 +33,7 @@ from google.genai import errors as genai_errors
 from google.genai import types
 
 from app.core.config import settings
-from app.schemas.criteria import Criterion, CRITERION_LABELS
+from app.schemas.criteria import label_for
 from app.services.llm_schemas import ComparisonReportResult
 from app.services.search_client import SearchResultItem
 
@@ -140,7 +140,7 @@ def _build_prompt(
     sources: dict[int, SearchResultItem],
 ) -> str:
     criteria_lines = "\n".join(
-        f"- key: {key}, label: {CRITERION_LABELS[Criterion(key)]}" for key in criteria
+        f"- key: {key}, label: {label_for(key)}" for key in criteria
     )
     sources_text = _format_sources(sources) if sources else "(情報源が見つかりませんでした)"
 

@@ -1,8 +1,12 @@
 "use client";
 
+import Link from "next/link";
 import { useEffect, useState } from "react";
 import { useParams } from "next/navigation";
 
+import { Alert } from "@/components/Alert";
+import { Card } from "@/components/Card";
+import { PageContainer } from "@/components/PageContainer";
 import { getEvidence, type EvidenceDetail } from "@/lib/api";
 
 export default function EvidenceViewerPage() {
@@ -36,41 +40,86 @@ export default function EvidenceViewerPage() {
   }, [params.id]);
 
   return (
-    <main style={{ maxWidth: 640, margin: "0 auto", padding: "2rem 1rem" }}>
-      <h1>Evidence Viewer</h1>
+    <PageContainer maxWidth={640}>
+      {evidence && (
+        <Link
+          href={`/research/${evidence.research_id}/result`}
+          style={{
+            display: "inline-block",
+            fontSize: "0.85rem",
+            fontWeight: 600,
+            color: "var(--color-accent)",
+            marginBottom: "var(--space-4)",
+          }}
+        >
+          ← Back to Report
+        </Link>
+      )}
 
-      {isLoading && <p>読み込み中...</p>}
-      {error && <p style={{ color: "crimson" }}>{error}</p>}
+      <h1>Evidence</h1>
+
+      {isLoading && (
+        <Card style={{ marginTop: "var(--space-4)" }}>
+          <p style={{ color: "var(--color-text-muted)" }}>読み込み中…</p>
+        </Card>
+      )}
+
+      {error && (
+        <Alert tone="danger" title="Evidenceの取得に失敗しました" details={error} />
+      )}
 
       {evidence && (
-        <dl>
-          <dt>比較軸</dt>
-          <dd>{evidence.criterion_label}</dd>
+        <>
+          <p
+            style={{
+              color: "var(--color-text-muted)",
+              margin: "var(--space-2) 0 var(--space-5)",
+            }}
+          >
+            <strong style={{ color: "var(--color-text)" }}>{evidence.side_label}</strong>
+            {" · "}
+            {evidence.criterion_label}
+          </p>
 
-          <dt>Claim(何についての根拠か)</dt>
-          <dd>{evidence.claim}</dd>
-
-          <dt>情報源タイトル</dt>
-          <dd>{evidence.source_title}</dd>
-
-          <dt>情報源URL</dt>
-          <dd>
-            <a href={evidence.source_url} target="_blank" rel="noreferrer">
-              {evidence.source_url}
+          <Card style={{ marginBottom: "var(--space-4)" }}>
+            <p className="evidence-detail__section-label">Source</p>
+            <a
+              href={evidence.source_url}
+              target="_blank"
+              rel="noreferrer"
+              style={{ fontWeight: 700, color: "var(--color-accent)" }}
+            >
+              {evidence.source_title}
             </a>
-          </dd>
+            <p
+              style={{
+                marginTop: "var(--space-1)",
+                fontSize: "0.8rem",
+                color: "var(--color-text-subtle)",
+                wordBreak: "break-all",
+              }}
+            >
+              {evidence.source_url}
+            </p>
+          </Card>
 
-          <dt>根拠となった本文(抜粋)</dt>
-          <dd style={{ whiteSpace: "pre-wrap" }}>{evidence.evidence_text}</dd>
-        </dl>
-      )}
+          <Card>
+            <p className="evidence-detail__section-label">Source excerpt</p>
+            <p className="evidence-detail__quote">{evidence.evidence_text}</p>
+          </Card>
 
-      {evidence && (
-        <p style={{ marginTop: "1.5rem", fontSize: "0.85rem", opacity: 0.7 }}>
-          この根拠本文はLLMが生成したものではなく、Web検索(Tavily API)で
-          実際に取得した情報源の本文をそのまま表示しています。
-        </p>
+          <p
+            style={{
+              marginTop: "var(--space-5)",
+              fontSize: "0.85rem",
+              color: "var(--color-text-subtle)",
+            }}
+          >
+            この根拠本文はLLMが生成したものではなく、Web検索(Tavily API)で
+            実際に取得した情報源の本文をそのまま表示しています。
+          </p>
+        </>
       )}
-    </main>
+    </PageContainer>
   );
 }

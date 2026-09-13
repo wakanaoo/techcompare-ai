@@ -1,15 +1,88 @@
+/* ==========================================================================
+   デザイントークン(CSS変数)
+   白〜ごく薄いグレーを基調に、チャコール系の文字色と、
+   落ち着いた寒色(スレートブルー)のアクセント1色でまとめる。
+   Tailwind等は使わず、ここに集約する。
+   ========================================================================== */
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  /* ページ背景はごく薄いグレー、カード面は白にして階調を作る */
+  --color-bg: #f7f8fa;
+  --color-surface: #ffffff;
+
+  --color-text: #1f2430;
+  --color-text-muted: #5b6472;
+  --color-text-subtle: #8890a0;
+
+  --color-border: #e2e5ea;
+  --color-border-strong: #c9ced7;
+
+  /* 落ち着いた寒色アクセント(スレートブルー) */
+  --color-accent: #3454a3;
+  --color-accent-hover: #2a4384;
+  --color-accent-subtle: #eaeffb;
+
+  --color-success: #1f7a4d;
+  --color-success-subtle: #e6f4ec;
+
+  --color-danger: #b3311f;
+  --color-danger-subtle: #fbeae7;
+
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --space-5: 1.5rem;
+  --space-6: 2rem;
+  --space-7: 3rem;
+
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 16px;
+  --radius-full: 999px;
+
+  --shadow-sm: 0 1px 2px rgba(20, 24, 33, 0.05);
+  --shadow-md: 0 4px 16px rgba(20, 24, 33, 0.08);
+
+  /* next/font(Geist)で読み込んだ変数。無ければ標準フォントへfallbackする */
+  --font-sans: var(--font-geist-sans), -apple-system, "Hiragino Kaku Gothic ProN",
+    "Yu Gothic", sans-serif;
+  --font-mono: var(--font-geist-mono), ui-monospace, SFMono-Regular, monospace;
+
+  /* 後方互換(旧トークン名を参照している箇所がまだあっても壊れないように) */
+  --background: var(--color-bg);
+  --foreground: var(--color-text);
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
+    --color-bg: #14161b;
+    --color-surface: #1c1f26;
+
+    --color-text: #eceef2;
+    --color-text-muted: #a7aebb;
+    --color-text-subtle: #7d8492;
+
+    --color-border: #2c313b;
+    --color-border-strong: #3a404c;
+
+    --color-accent: #7a9aeb;
+    --color-accent-hover: #93aef0;
+    --color-accent-subtle: #24304d;
+
+    --color-success: #4fbf87;
+    --color-success-subtle: #163023;
+
+    --color-danger: #e2685a;
+    --color-danger-subtle: #3a201c;
+
+    --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
+    --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.4);
   }
 }
 
+/* ==========================================================================
+   ベース要素
+   ========================================================================== */
 html {
   height: 100%;
 }
@@ -24,9 +97,9 @@ body {
   min-height: 100%;
   display: flex;
   flex-direction: column;
-  color: var(--foreground);
-  background: var(--background);
-  font-family: Arial, Helvetica, sans-serif;
+  color: var(--color-text);
+  background: var(--color-bg);
+  font-family: var(--font-sans);
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 }
@@ -48,43 +121,643 @@ a {
   }
 }
 
-/* Phase 1: 最低限見やすくするための簡易スタイル。デザインは後回し。 */
+h1,
+h2,
+h3 {
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+
+h1 {
+  font-size: 1.5rem;
+}
+
+h2 {
+  font-size: 1.1rem;
+}
+
 label {
   display: flex;
   flex-direction: column;
-  gap: 0.25rem;
+  gap: var(--space-1);
   font-size: 0.9rem;
-  margin-bottom: 1rem;
+  margin-bottom: var(--space-4);
 }
 
 input {
-  padding: 0.5rem;
+  padding: var(--space-2) var(--space-3);
   font-size: 1rem;
-  border: 1px solid #888;
-  border-radius: 4px;
+  font-family: inherit;
+  color: var(--color-text);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-sm);
+}
+
+input:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 1px;
 }
 
 button {
-  padding: 0.6rem 1rem;
-  font-size: 1rem;
+  font-family: inherit;
   cursor: pointer;
-  border: 1px solid #888;
-  border-radius: 4px;
-  background: var(--foreground);
-  color: var(--background);
-}
-
-button:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
 }
 
 dl {
   display: grid;
   grid-template-columns: auto 1fr;
-  gap: 0.4rem 1rem;
+  gap: var(--space-2) var(--space-4);
 }
 
 dt {
-  font-weight: bold;
+  font-weight: 600;
+  color: var(--color-text-muted);
+}
+
+/* ==========================================================================
+   Header
+   ========================================================================== */
+.app-header {
+  border-bottom: 1px solid var(--color-border);
+  background: var(--color-surface);
+}
+
+.app-header__inner {
+  max-width: 880px;
+  margin: 0 auto;
+  padding: var(--space-3) var(--space-4);
+  display: flex;
+  align-items: center;
+}
+
+.app-header__brand {
+  font-size: 1rem;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  color: var(--color-text);
+}
+
+/* ==========================================================================
+   PageContainer
+   ========================================================================== */
+.page-container {
+  width: 100%;
+  margin: 0 auto;
+  padding: var(--space-6) var(--space-4) var(--space-7);
+}
+
+@media (max-width: 480px) {
+  .page-container {
+    padding: var(--space-5) var(--space-3) var(--space-6);
+  }
+}
+
+/* ==========================================================================
+   Card
+   ========================================================================== */
+.card {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-sm);
+  padding: var(--space-5);
+}
+
+@media (max-width: 480px) {
+  .card {
+    padding: var(--space-4);
+    border-radius: var(--radius-md);
+  }
+}
+
+/* ==========================================================================
+   Button
+   ========================================================================== */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  padding: 0.65rem 1.25rem;
+  font-size: 0.95rem;
+  font-weight: 600;
+  border-radius: var(--radius-sm);
+  border: 1px solid transparent;
+  transition: background-color 0.15s ease, border-color 0.15s ease, opacity 0.15s ease;
+  white-space: nowrap;
+}
+
+.btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.btn--primary {
+  background: var(--color-accent);
+  color: #ffffff;
+  border-color: var(--color-accent);
+}
+
+.btn--primary:hover:not(:disabled) {
+  background: var(--color-accent-hover);
+  border-color: var(--color-accent-hover);
+}
+
+.btn--secondary {
+  background: var(--color-surface);
+  color: var(--color-text);
+  border-color: var(--color-border-strong);
+}
+
+.btn--secondary:hover:not(:disabled) {
+  background: var(--color-bg);
+}
+
+/* ==========================================================================
+   Badge
+   ========================================================================== */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: 0.2rem 0.65rem;
+  font-size: 0.78rem;
+  font-weight: 600;
+  border-radius: var(--radius-full);
+  white-space: nowrap;
+}
+
+.badge--neutral {
+  background: var(--color-bg);
+  color: var(--color-text-muted);
+  border: 1px solid var(--color-border);
+}
+
+.badge--info {
+  background: var(--color-accent-subtle);
+  color: var(--color-accent);
+}
+
+.badge--success {
+  background: var(--color-success-subtle);
+  color: var(--color-success);
+}
+
+.badge--danger {
+  background: var(--color-danger-subtle);
+  color: var(--color-danger);
+}
+
+/* ==========================================================================
+   Spinner
+   ========================================================================== */
+.spinner {
+  display: inline-block;
+  width: 1em;
+  height: 1em;
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  opacity: 0.85;
+  animation: spinner-rotate 0.7s linear infinite;
+}
+
+.spinner--lg {
+  width: 1.75rem;
+  height: 1.75rem;
+  border-width: 3px;
+}
+
+@keyframes spinner-rotate {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .spinner {
+    animation-duration: 1.6s;
+  }
+}
+
+/* ==========================================================================
+   Alert
+   ========================================================================== */
+.alert {
+  border-radius: var(--radius-md);
+  padding: var(--space-4);
+  border: 1px solid transparent;
+}
+
+.alert--danger {
+  background: var(--color-danger-subtle);
+  border-color: color-mix(in srgb, var(--color-danger) 25%, transparent);
+}
+
+.alert__title {
+  font-weight: 700;
+  color: var(--color-danger);
+  margin-bottom: var(--space-1);
+}
+
+.alert__description {
+  color: var(--color-text);
+  font-size: 0.92rem;
+}
+
+.alert__details {
+  margin-top: var(--space-3);
+  font-size: 0.82rem;
+  color: var(--color-text-muted);
+}
+
+.alert__details summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.alert__details pre {
+  margin-top: var(--space-2);
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  color: var(--color-text-muted);
+}
+
+/* ==========================================================================
+   Status timeline(pending / researching / completed / failed の実状態のみ)
+   ========================================================================== */
+.status-timeline {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+
+.status-timeline__item {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-3);
+  min-height: 2.5rem;
+}
+
+.status-timeline__marker-col {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+.status-timeline__dot {
+  width: 1.5rem;
+  height: 1.5rem;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.75rem;
+  font-weight: 700;
+  flex-shrink: 0;
+}
+
+.status-timeline__dot--done {
+  background: var(--color-success-subtle);
+  color: var(--color-success);
+}
+
+.status-timeline__dot--current {
+  background: var(--color-accent-subtle);
+  color: var(--color-accent);
+}
+
+.status-timeline__dot--upcoming {
+  background: var(--color-bg);
+  color: var(--color-text-subtle);
+  border: 1px solid var(--color-border);
+}
+
+.status-timeline__dot--failed {
+  background: var(--color-danger-subtle);
+  color: var(--color-danger);
+}
+
+.status-timeline__line {
+  width: 2px;
+  flex: 1;
+  min-height: var(--space-4);
+  background: var(--color-border);
+  margin: var(--space-1) 0;
+}
+
+.status-timeline__label {
+  padding-top: 0.2rem;
+  font-size: 0.92rem;
+  font-weight: 600;
+  color: var(--color-text-muted);
+}
+
+.status-timeline__label--active {
+  color: var(--color-text);
+}
+
+/* ==========================================================================
+   New Researchの比較軸チップ
+   ========================================================================== */
+.chip-group {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.chip {
+  padding: 0.45rem 0.9rem;
+  font-size: 0.88rem;
+  font-weight: 600;
+  border-radius: var(--radius-full);
+  border: 1px solid var(--color-border-strong);
+  background: var(--color-surface);
+  color: var(--color-text-muted);
+  transition: background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+}
+
+.chip[aria-pressed="true"] {
+  background: var(--color-accent-subtle);
+  border-color: var(--color-accent);
+  color: var(--color-accent);
+}
+
+.chip:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* ==========================================================================
+   ScoreDots(5段階ドットのスコア表示)
+   ========================================================================== */
+.score-dots {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.score-dots__dots {
+  display: inline-flex;
+  gap: 4px;
+}
+
+.score-dots__dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--color-border-strong);
+}
+
+.score-dots__dot--filled {
+  background: var(--color-text);
+}
+
+.score-dots__label {
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: var(--color-text-muted);
+}
+
+/* ==========================================================================
+   EvidenceLinks
+   ========================================================================== */
+.evidence-links {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.evidence-links--empty {
+  font-size: 0.82rem;
+  color: var(--color-text-subtle);
+}
+
+.evidence-links__single {
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: var(--color-accent);
+}
+
+.evidence-links__single:hover {
+  color: var(--color-accent-hover);
+}
+
+.evidence-links__count {
+  font-size: 0.82rem;
+  color: var(--color-text-muted);
+}
+
+.evidence-links__chips {
+  display: inline-flex;
+  gap: var(--space-1);
+}
+
+.evidence-links__chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.4rem;
+  height: 1.4rem;
+  font-size: 0.75rem;
+  font-weight: 700;
+  border-radius: var(--radius-full);
+  background: var(--color-accent-subtle);
+  color: var(--color-accent);
+}
+
+.evidence-links__chip:hover {
+  background: var(--color-accent);
+  color: #ffffff;
+}
+
+/* ==========================================================================
+   Comparison Reportのページヘッダー(eyebrow + 主タイトル + Use case)
+   ========================================================================== */
+.report-header__eyebrow {
+  font-size: 0.75rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  color: var(--color-text-subtle);
+  text-transform: uppercase;
+}
+
+.report-header__title {
+  font-size: 1.9rem;
+  font-weight: 800;
+  letter-spacing: -0.01em;
+  margin-top: var(--space-1);
+}
+
+.report-header__usecase {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  margin-top: var(--space-3);
+}
+
+.report-header__usecase-label {
+  font-size: 0.75rem;
+  font-weight: 700;
+  color: var(--color-text-subtle);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.report-header__usecase-text {
+  color: var(--color-text-muted);
+}
+
+/* ==========================================================================
+   Recommendation
+   ========================================================================== */
+.recommendation__label {
+  font-size: 0.75rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  color: var(--color-text-subtle);
+  text-transform: uppercase;
+}
+
+.recommendation__winner {
+  font-size: 1.75rem;
+  font-weight: 800;
+  color: var(--color-accent);
+  letter-spacing: -0.01em;
+  margin-top: var(--space-1);
+}
+
+.recommendation__summary {
+  margin-top: var(--space-3);
+  color: var(--color-text);
+}
+
+.recommendation__why-label {
+  margin-top: var(--space-4);
+  font-size: 0.78rem;
+  font-weight: 700;
+  color: var(--color-text-subtle);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.recommendation__reason {
+  margin-top: var(--space-1);
+  color: var(--color-text-muted);
+  font-size: 0.92rem;
+}
+
+/* ==========================================================================
+   Comparison table(全セル罫線をやめ、行の下線中心にする)
+   ========================================================================== */
+.comparison-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.comparison-table th {
+  text-align: left;
+  font-size: 0.78rem;
+  font-weight: 700;
+  color: var(--color-text-subtle);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--color-border-strong);
+  white-space: nowrap;
+}
+
+.comparison-table td {
+  padding: var(--space-4) var(--space-3);
+  border-bottom: 1px solid var(--color-border);
+  vertical-align: top;
+}
+
+.comparison-table tr:last-child td {
+  border-bottom: none;
+}
+
+.comparison-table__criterion-col {
+  width: 1%;
+  white-space: nowrap;
+  font-weight: 600;
+}
+
+.comparison-table__result-col {
+  width: 1%;
+  white-space: nowrap;
+}
+
+.comparison-table__item-summary {
+  color: var(--color-text);
+  margin-bottom: var(--space-3);
+}
+
+/* デスクトップ幅ではtable、狭い画面ではcriterionごとのcardへ切り替える。
+   JSでのbreakpoint判定は行わず、CSSのみでの出し分けにする
+   (SSR/hydrationの不整合を避けるため)。 */
+.comparison-cards {
+  display: none;
+}
+
+@media (max-width: 720px) {
+  .comparison-table-wrapper {
+    display: none;
+  }
+
+  .comparison-cards {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-4);
+  }
+}
+
+.comparison-card__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: var(--space-3);
+}
+
+.comparison-card__side {
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--color-border);
+  margin-top: var(--space-3);
+}
+
+.comparison-card__side:first-of-type {
+  padding-top: 0;
+  border-top: none;
+  margin-top: 0;
+}
+
+.comparison-card__side-name {
+  font-size: 0.85rem;
+  font-weight: 700;
+  margin-bottom: var(--space-1);
+}
+
+/* ==========================================================================
+   Evidence Viewer
+   ========================================================================== */
+.evidence-detail__section-label {
+  font-size: 0.75rem;
+  font-weight: 700;
+  color: var(--color-text-subtle);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-bottom: var(--space-2);
+}
+
+.evidence-detail__quote {
+  border-left: 3px solid var(--color-accent);
+  padding-left: var(--space-3);
+  color: var(--color-text);
+  white-space: pre-wrap;
+  line-height: 1.6;
 }

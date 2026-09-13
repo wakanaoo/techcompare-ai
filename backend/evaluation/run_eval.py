@@ -17,7 +17,6 @@ from datetime import datetime, timezone
 from google.genai import errors as genai_errors
 
 from app.db.session import SessionLocal
-from app.models.evidence import Evidence
 from app.models.research import Research
 from app.services.llm_client import MODEL
 from app.services.research_runner import run_research
@@ -100,18 +99,6 @@ def _create_pending_research(case: EvaluationCase) -> int:
         db.close()
 
 
-def _evidence_side(evidence: Evidence, research: Research) -> str:
-    """Evidence.claimは`f"{side_label}の{criterion_label}について"`という
-    固定フォーマット(research_runner.py参照)なので、先頭が
-    item_a/item_bどちらの名前かでsideを判定する。
-    """
-    if evidence.claim.startswith(f"{research.item_a}の"):
-        return "item_a"
-    if evidence.claim.startswith(f"{research.item_b}の"):
-        return "item_b"
-    raise ValueError(f"Evidence.claim '{evidence.claim}' からsideを判定できませんでした。")
-
-
 def _load_case_result(case: EvaluationCase, research_id: int) -> CaseRunResult:
     db = SessionLocal()
     try:
@@ -125,8 +112,10 @@ def _load_case_result(case: EvaluationCase, research_id: int) -> CaseRunResult:
         judge_claims: list[JudgeClaimInput] = []
 
         for comp in research.comparisons:
-            a_evidences = [e for e in comp.evidences if _evidence_side(e, research) == "item_a"]
-            b_evidences = [e for e in comp.evidences if _evidence_side(e, research) == "item_b"]
+            # Evidence.sideは構造化された列(Phase 5B)なので、claim文字列の
+            # パースには依存せずそのまま使う。
+            a_evidences = [e for e in comp.evidences if e.side == "item_a"]
+            b_evidences = [e for e in comp.evidences if e.side == "item_b"]
             for e in comp.evidences:
                 cited_source_ids.add(e.source_id)
 

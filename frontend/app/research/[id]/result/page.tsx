@@ -1,15 +1,42 @@
 "use client";
 
-import Link from "next/link";
 import { useEffect, useState } from "react";
 import { useParams } from "next/navigation";
 
-import { getResearchResult, type ResearchResult, type Winner } from "@/lib/api";
+import { Alert } from "@/components/Alert";
+import { Badge } from "@/components/Badge";
+import { Card } from "@/components/Card";
+import { EvidenceLinks } from "@/components/EvidenceLinks";
+import { PageContainer } from "@/components/PageContainer";
+import { ScoreDots } from "@/components/ScoreDots";
+import {
+  getResearchResult,
+  type ComparisonRow,
+  type ResearchResult,
+  type Side,
+  type Winner,
+} from "@/lib/api";
 
+/** Comparison表・Resultバッジ用の短いラベル("Tie"はそのまま表示する)。 */
 function winnerLabel(winner: Winner, itemA: string, itemB: string): string {
   if (winner === "item_a") return itemA;
   if (winner === "item_b") return itemB;
-  return "引き分け";
+  return "Tie";
+}
+
+/** Recommendationカードの見出し用(tieの場合はより自然な言い回しにする)。 */
+function recommendationHeadline(winner: Winner, itemA: string, itemB: string): string {
+  if (winner === "item_a") return itemA;
+  if (winner === "item_b") return itemB;
+  return "No clear winner";
+}
+
+function winnerBadgeTone(winner: Winner): "info" | "neutral" {
+  return winner === "tie" ? "neutral" : "info";
+}
+
+function evidenceForSide(row: ComparisonRow, side: Side) {
+  return row.evidence.filter((e) => e.side === side);
 }
 
 export default function ComparisonReportPage() {
@@ -43,77 +70,79 @@ export default function ComparisonReportPage() {
   }, [params.id]);
 
   return (
-    <main style={{ maxWidth: 720, margin: "0 auto", padding: "2rem 1rem" }}>
-      <h1>Comparison Report</h1>
+    <PageContainer maxWidth={880}>
+      {!result && <h1>Comparison Report</h1>}
 
-      {isLoading && <p>読み込み中...</p>}
-      {error && <p style={{ color: "crimson" }}>{error}</p>}
+      {isLoading && (
+        <Card style={{ marginTop: "var(--space-4)" }}>
+          <p style={{ color: "var(--color-text-muted)" }}>読み込み中…</p>
+        </Card>
+      )}
+
+      {error && (
+        <Alert tone="danger" title="比較結果の取得に失敗しました" details={error} />
+      )}
 
       {result && (
         <>
-          <p style={{ fontSize: "1.1rem", fontWeight: "bold" }}>
-            {result.item_a} vs {result.item_b}
-          </p>
-          <p style={{ marginBottom: "1.5rem" }}>目的: {result.goal}</p>
+          <div style={{ marginBottom: "var(--space-6)" }}>
+            <p className="report-header__eyebrow">Comparison Report</p>
+            <h1 className="report-header__title">
+              {result.item_a} vs {result.item_b}
+            </h1>
+            <div className="report-header__usecase">
+              <span className="report-header__usecase-label">Use case</span>
+              <span className="report-header__usecase-text">{result.goal}</span>
+            </div>
+          </div>
 
-          <section
-            style={{
-              border: "1px solid #888",
-              borderRadius: 6,
-              padding: "1rem",
-              marginBottom: "1.5rem",
-            }}
-          >
-            <h2 style={{ marginBottom: "0.5rem" }}>Recommendation</h2>
-            <p>
-              <strong>推奨:</strong>{" "}
-              {winnerLabel(result.recommendation.winner, result.item_a, result.item_b)}
+          <Card style={{ marginBottom: "var(--space-6)" }}>
+            <p className="recommendation__label">Recommendation</p>
+            <p className="recommendation__winner">
+              {recommendationHeadline(result.recommendation.winner, result.item_a, result.item_b)}
             </p>
-            <p>{result.recommendation.summary}</p>
-            <p style={{ marginTop: "0.5rem", opacity: 0.85 }}>
-              理由: {result.recommendation.reason}
-            </p>
-          </section>
+            <p className="recommendation__summary">{result.recommendation.summary}</p>
+            <p className="recommendation__why-label">Why</p>
+            <p className="recommendation__reason">{result.recommendation.reason}</p>
+          </Card>
 
-          <h2 style={{ marginBottom: "0.5rem" }}>比較表</h2>
-          <div style={{ overflowX: "auto" }}>
-            <table style={{ borderCollapse: "collapse", width: "100%" }}>
+          <h2 style={{ marginBottom: "var(--space-3)" }}>Comparison</h2>
+
+          {/* デスクトップ: table。狭い画面ではCSSでcriterionごとのcardへ切り替える。 */}
+          <div className="comparison-table-wrapper" style={{ overflowX: "auto" }}>
+            <table className="comparison-table">
               <thead>
                 <tr>
-                  <th style={cellStyle}>比較軸</th>
-                  <th style={cellStyle}>{result.item_a}</th>
-                  <th style={cellStyle}>{result.item_b}</th>
-                  <th style={cellStyle}>優位</th>
-                  <th style={cellStyle}>根拠</th>
+                  <th className="comparison-table__criterion-col">Point</th>
+                  <th>{result.item_a}</th>
+                  <th>{result.item_b}</th>
+                  <th className="comparison-table__result-col">Result</th>
                 </tr>
               </thead>
               <tbody>
                 {result.comparisons.map((row) => (
                   <tr key={row.criterion}>
-                    <td style={cellStyle}>{row.criterion_label}</td>
-                    <td style={cellStyle}>
-                      {row.item_a_summary}
-                      <br />
-                      <strong>スコア: {row.item_a_score}/5</strong>
+                    <td className="comparison-table__criterion-col">
+                      {row.criterion_label}
                     </td>
-                    <td style={cellStyle}>
-                      {row.item_b_summary}
-                      <br />
-                      <strong>スコア: {row.item_b_score}/5</strong>
+                    <td>
+                      <p className="comparison-table__item-summary">{row.item_a_summary}</p>
+                      <ScoreDots score={row.item_a_score} />
+                      <div style={{ marginTop: "var(--space-2)" }}>
+                        <EvidenceLinks evidence={evidenceForSide(row, "item_a")} />
+                      </div>
                     </td>
-                    <td style={cellStyle}>
-                      {winnerLabel(row.winner, result.item_a, result.item_b)}
+                    <td>
+                      <p className="comparison-table__item-summary">{row.item_b_summary}</p>
+                      <ScoreDots score={row.item_b_score} />
+                      <div style={{ marginTop: "var(--space-2)" }}>
+                        <EvidenceLinks evidence={evidenceForSide(row, "item_b")} />
+                      </div>
                     </td>
-                    <td style={cellStyle}>
-                      {row.evidence.length === 0 ? (
-                        <span style={{ opacity: 0.6 }}>根拠なし</span>
-                      ) : (
-                        row.evidence.map((ev) => (
-                          <div key={ev.id}>
-                            <Link href={`/evidence/${ev.id}`}>根拠を見る</Link>
-                          </div>
-                        ))
-                      )}
+                    <td className="comparison-table__result-col">
+                      <Badge tone={winnerBadgeTone(row.winner)}>
+                        {winnerLabel(row.winner, result.item_a, result.item_b)}
+                      </Badge>
                     </td>
                   </tr>
                 ))}
@@ -121,16 +150,61 @@ export default function ComparisonReportPage() {
             </table>
           </div>
 
-          <h2 style={{ marginTop: "1.5rem", marginBottom: "0.5rem" }}>
-            参照した情報源
+          <div className="comparison-cards">
+            {result.comparisons.map((row) => (
+              <Card key={row.criterion}>
+                <div className="comparison-card__header">
+                  <span style={{ fontWeight: 700 }}>{row.criterion_label}</span>
+                  <Badge tone={winnerBadgeTone(row.winner)}>
+                    {winnerLabel(row.winner, result.item_a, result.item_b)}
+                  </Badge>
+                </div>
+
+                <div className="comparison-card__side">
+                  <p className="comparison-card__side-name">{result.item_a}</p>
+                  <p className="comparison-table__item-summary">{row.item_a_summary}</p>
+                  <ScoreDots score={row.item_a_score} />
+                  <div style={{ marginTop: "var(--space-2)" }}>
+                    <EvidenceLinks evidence={evidenceForSide(row, "item_a")} />
+                  </div>
+                </div>
+
+                <div className="comparison-card__side">
+                  <p className="comparison-card__side-name">{result.item_b}</p>
+                  <p className="comparison-table__item-summary">{row.item_b_summary}</p>
+                  <ScoreDots score={row.item_b_score} />
+                  <div style={{ marginTop: "var(--space-2)" }}>
+                    <EvidenceLinks evidence={evidenceForSide(row, "item_b")} />
+                  </div>
+                </div>
+              </Card>
+            ))}
+          </div>
+
+          <h2 style={{ marginTop: "var(--space-6)", marginBottom: "var(--space-3)" }}>
+            Sources
           </h2>
           {result.sources.length === 0 ? (
-            <p style={{ opacity: 0.7 }}>参照できる情報源が見つかりませんでした。</p>
+            <p style={{ color: "var(--color-text-muted)" }}>
+              参照できる情報源が見つかりませんでした。
+            </p>
           ) : (
-            <ul>
+            <ul
+              style={{
+                listStyle: "none",
+                display: "flex",
+                flexDirection: "column",
+                gap: "var(--space-2)",
+              }}
+            >
               {result.sources.map((source) => (
                 <li key={source.id}>
-                  <a href={source.url} target="_blank" rel="noreferrer">
+                  <a
+                    href={source.url}
+                    target="_blank"
+                    rel="noreferrer"
+                    style={{ color: "var(--color-accent)", fontSize: "0.92rem" }}
+                  >
                     {source.title}
                   </a>
                 </li>
@@ -140,11 +214,11 @@ export default function ComparisonReportPage() {
 
           <p
             style={{
-              marginTop: "1.5rem",
+              marginTop: "var(--space-6)",
               fontSize: "0.85rem",
-              opacity: 0.7,
-              borderTop: "1px solid #888",
-              paddingTop: "0.75rem",
+              color: "var(--color-text-subtle)",
+              borderTop: "1px solid var(--color-border)",
+              paddingTop: "var(--space-4)",
             }}
           >
             比較結果は上記の情報源に基づいてLLMが生成したものです。情報源に
@@ -153,13 +227,6 @@ export default function ComparisonReportPage() {
           </p>
         </>
       )}
-    </main>
+    </PageContainer>
   );
 }
-
-const cellStyle: React.CSSProperties = {
-  border: "1px solid #888",
-  padding: "0.5rem",
-  textAlign: "left",
-  verticalAlign: "top",
-};

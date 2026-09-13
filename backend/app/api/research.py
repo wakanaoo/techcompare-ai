@@ -39,7 +39,7 @@ def create_research(
         item_a=payload.item_a,
         item_b=payload.item_b,
         goal=payload.goal,
-        criteria=[c.value for c in payload.criteria],
+        criteria=payload.criteria,
         status="pending",
     )
     db.add(research)
@@ -105,6 +105,7 @@ def get_research_result(research_id: int, db: Session = Depends(get_db)) -> Rese
                         source_id=e.source_id,
                         source_title=e.source.title,
                         source_url=e.source.url,
+                        side=e.side,
                         claim=e.claim,
                         evidence_text=e.evidence_text,
                     )

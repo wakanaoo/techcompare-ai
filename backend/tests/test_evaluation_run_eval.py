@@ -15,7 +15,7 @@ from app.services.search_client import SearchResultItem
 from conftest import make_genai_api_error
 from evaluation.dataset import EvaluationCase
 from evaluation.judge import CaseJudgmentResult, ClaimJudgment, ClaimVerdict
-from evaluation.run_eval import _evidence_side, build_aggregate, run_evaluation
+from evaluation.run_eval import build_aggregate, run_evaluation
 
 
 class _FakeUsageMetadata:
@@ -102,20 +102,6 @@ def _fake_search(item_name: str) -> list[SearchResultItem]:
             title=f"{item_name} doc", url=f"https://example.com/{item_name}", content=f"{item_name} content"
         )
     ]
-
-
-def test_evidence_side_determines_side_from_claim_prefix():
-    class _Research:
-        item_a = "FastAPI"
-        item_b = "Django"
-
-    class _Evidence:
-        def __init__(self, claim):
-            self.claim = claim
-
-    research = _Research()
-    assert _evidence_side(_Evidence("FastAPIの開発速度について"), research) == "item_a"
-    assert _evidence_side(_Evidence("Djangoの開発速度について"), research) == "item_b"
 
 
 def test_run_evaluation_end_to_end(client, monkeypatch):

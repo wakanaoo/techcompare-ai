@@ -19,8 +19,13 @@ def get_evidence(evidence_id: int, db: Session = Depends(get_db)) -> EvidenceDet
     if evidence is None:
         raise HTTPException(status_code=404, detail="Evidence not found")
 
+    research = evidence.comparison.research
+    side_label = research.item_a if evidence.side == "item_a" else research.item_b
+
     return EvidenceDetailRead(
         id=evidence.id,
+        side=evidence.side,
+        side_label=side_label,
         claim=evidence.claim,
         evidence_text=evidence.evidence_text,
         source_title=evidence.source.title,

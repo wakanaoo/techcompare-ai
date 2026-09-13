@@ -8,9 +8,13 @@ Comparison 1 : N Evidences の関係。
   evidence_textはSource.contentをそのまま複製したもの。
   LLMが担うのは「どのsource_idを根拠にしたか」の選択だけで、
   根拠本文そのものを生成させない(存在しない引用文の捏造を防ぐため)。
+- side("item_a"/"item_b")は、Evidenceがどちらの技術の主張を裏付ける
+  ものかを示す構造化された列。Phase 5Bで追加(claim文字列をパースして
+  推測するのではなく、research_runner.pyがEvidence作成時に明示的に
+  保存する。既存データへの導入はmigrationでのbackfillによる)。
 """
 
-from sqlalchemy import Column, DateTime, ForeignKey, Integer, Text
+from sqlalchemy import CheckConstraint, Column, DateTime, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 
@@ -19,6 +23,9 @@ from app.db.session import Base
 
 class Evidence(Base):
     __tablename__ = "evidences"
+    __table_args__ = (
+        CheckConstraint("side IN ('item_a', 'item_b')", name="ck_evidences_side"),
+    )
 
     id = Column(Integer, primary_key=True, index=True)
     comparison_id = Column(
@@ -33,6 +40,7 @@ class Evidence(Base):
         nullable=False,
         index=True,
     )
+    side = Column(String, nullable=False)
     claim = Column(Text, nullable=False)
     evidence_text = Column(Text, nullable=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
