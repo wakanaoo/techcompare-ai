@@ -129,6 +129,45 @@ export async function getEvidence(id: string): Promise<EvidenceDetail> {
   return response.json();
 }
 
+export interface CriterionSuggestion {
+  name: string;
+  reason: string;
+}
+
+export interface SuggestCriteriaInput {
+  item_a: string;
+  item_b: string;
+  goal: string;
+  existing_criteria: string[];
+}
+
+export interface SuggestCriteriaResult {
+  suggestions: CriterionSuggestion[];
+}
+
+/**
+ * Suggest Points(POST /suggest-criteria)。Geminiのみを1回呼ぶ補助API
+ * (Tavilyは呼ばない、Research/Source/Evidenceは作らない)。必ず明示的な
+ * button actionから呼び出すこと(入力のたびに自動呼び出ししない)。
+ */
+export async function suggestCriteria(
+  input: SuggestCriteriaInput,
+): Promise<SuggestCriteriaResult> {
+  const response = await fetch(`${API_BASE_URL}/suggest-criteria`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+
+  if (!response.ok) {
+    const body = await response.json().catch(() => null);
+    const detail = body?.detail ?? `status: ${response.status}`;
+    throw new Error(`比較ポイント候補の取得に失敗しました (${detail})`);
+  }
+
+  return response.json();
+}
+
 export async function getResearchResult(id: string): Promise<ResearchResult> {
   const response = await fetch(`${API_BASE_URL}/research/${id}/result`);
 

@@ -1,81 +1,98 @@
 "use client";
 
-import { useState, type FormEvent, type KeyboardEvent } from "react";
+import { useMemo, useState, type FormEvent, type KeyboardEvent } from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 
 import { Button } from "@/components/Button";
-import { Card } from "@/components/Card";
+import { CriterionChip } from "@/components/CriterionChip";
+import { CustomCriteriaChips } from "@/components/CustomCriteriaChips";
 import { PageContainer } from "@/components/PageContainer";
+import { SuggestPointsPanel } from "@/components/SuggestPointsPanel";
+import { UseCaseInput } from "@/components/UseCaseInput";
+import { useCriteriaSelection } from "@/hooks/useCriteriaSelection";
 import { createResearch } from "@/lib/api";
-import {
-  CRITERION_OPTIONS,
-  DEFAULT_CRITERIA,
-  MAX_CRITERIA,
-  MAX_CRITERION_LENGTH,
-  MIN_CRITERIA,
-  canonicalCriterionKey,
-} from "@/lib/criteria";
+import { findTechnologyIdByName, getUseCaseExamples } from "@/lib/catalog";
+import { CRITERION_OPTIONS, DEFAULT_CRITERIA, MAX_CRITERIA, MIN_CRITERIA } from "@/lib/criteria";
+import { CATEGORIES } from "@/data/categories";
+import { TECHNOLOGY_PAIR_EXAMPLES } from "@/data/technologyPairExamples";
 
+// Exploreのhover previewに出す代表カテゴリ。実際に技術データを持つ
+// (`available: true`)カテゴリだけを見せる(Coming soonのカテゴリは
+// Exploreしても中身が無いため、期待外れな誘導を避ける)。
+const EXPLORE_PREVIEW_CATEGORIES = CATEGORIES.filter((c) => c.available)
+  .map((c) => c.name)
+  .join(" · ");
+
+/**
+ * Home(Phase 5C Finishing 追補v4)。
+ *
+ * 初期状態はLearn(旧Explore)/Compareという2つの同格の入口だけを見せ、
+ * 説明文は追加しない。Compareは実際にクリックするまでフォームを展開しない
+ * (`compareExpanded`)。Learn/Compare双方にdesktop限定のhover/focus
+ * preview(CSSのみ、`app/globals.css`の`.home-entry__preview`)を持たせる。
+ * Learnのリンク先は引き続き`/explore`(Technology Map)。
+ */
 export default function NewResearchPage() {
   const router = useRouter();
+  const [compareExpanded, setCompareExpanded] = useState(false);
   const [itemA, setItemA] = useState("");
   const [itemB, setItemB] = useState("");
+  const [pairExampleIndex, setPairExampleIndex] = useState(0);
   const [goal, setGoal] = useState("");
-  const [criteria, setCriteria] = useState<string[]>(DEFAULT_CRITERIA);
-  const [customInput, setCustomInput] = useState("");
-  const [criteriaError, setCriteriaError] = useState<string | null>(null);
+  const criteriaSelection = useCriteriaSelection(DEFAULT_CRITERIA);
+  const {
+    criteria,
+    customInput,
+    setCustomInput,
+    criteriaError,
+    toggleCriterion,
+    addCustomCriterion,
+    reachedMaxCriteria,
+  } = criteriaSelection;
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // 「候補」チップ以外(自由入力で追加したもの)を表示用に分けておく。
+  // 固定候補(CRITERION_OPTIONS)のラベルをそのままBase Pointの値として使う
+  // (Compare SetupのBase Pointsと同じく「表示ラベル=送信する値」。
+  // lib/criteria.ts参照)。
+  const basePointLabels = useMemo(() => CRITERION_OPTIONS.map((option) => option.label), []);
+
+  // Technology A/Bがcatalogの技術名と一致すれば、そのペア固有のUse Case
+  // Examplesを、一致しなければ汎用exampleを使う(API呼び出しなし)。
+  const useCaseExamples = useMemo(() => {
+    const idA = findTechnologyIdByName(itemA);
+    const idB = findTechnologyIdByName(itemB);
+    return getUseCaseExamples(idA, idB);
+  }, [itemA, itemB]);
+
+  // 固定候補以外(自由入力で追加したもの)を表示用に分けておく。
   const customChips = criteria.filter(
-    (c) => !CRITERION_OPTIONS.some((option) => option.key === c),
+    (c) => !CRITERION_OPTIONS.some((option) => option.label === c),
   );
 
-  function toggleCriterion(key: string) {
-    // canonicalCriterionKey()で正規化した上で照合する。固定候補のkeyと、
-    // それに対応するlabelを自由入力で追加した場合が同一視され、
-    // どちらの経路からでも二重に追加されないようにする。
-    const canonicalTarget = canonicalCriterionKey(key);
+  /**
+   * Technology A/Bの"↗ Example comparison"。クリックするたびにcurated pairを
+   * 1件ずつ順送りする(APIは呼ばない静的data、`data/technologyPairExamples.ts`)。
+   *
+   * 安全策: 「A/Bが両方とも空」または「A/Bとも直前に採用したペアと完全一致」の
+   * ときだけ次のペアへ進める。ユーザーがA/Bのどちらか片方でも自分で書き換えて
+   * いたら(部分一致・不一致どちらでも)何もしない=既存の入力を絶対に消さない。
+   */
+  function handleExampleComparisonClick() {
+    const currentPairExample = TECHNOLOGY_PAIR_EXAMPLES[pairExampleIndex];
+    const bothEmpty = itemA === "" && itemB === "";
+    const matchesCurrent =
+      itemA === currentPairExample.itemA && itemB === currentPairExample.itemB;
+    if (!bothEmpty && !matchesCurrent) return;
 
-    setCriteria((current) => {
-      const existingMatch = current.find(
-        (c) => canonicalCriterionKey(c) === canonicalTarget,
-      );
-      if (existingMatch !== undefined) {
-        return current.filter((c) => c !== existingMatch);
-      }
-      if (current.length >= MAX_CRITERIA) {
-        return current;
-      }
-      return [...current, key];
-    });
-  }
-
-  function addCustomCriterion() {
-    const trimmed = customInput.trim();
-    setCriteriaError(null);
-
-    if (!trimmed) return;
-
-    if (trimmed.length > MAX_CRITERION_LENGTH) {
-      setCriteriaError(`項目は${MAX_CRITERION_LENGTH}文字以内で入力してください`);
-      return;
-    }
-    if (criteria.length >= MAX_CRITERIA) {
-      setCriteriaError(`項目は最大${MAX_CRITERIA}個までです`);
-      return;
-    }
-    // 固定候補のkey↔labelも含めて正規化して重複を判定する
-    // (backendのcanonical_key_for()と同じロジック)。
-    const dedupeKey = canonicalCriterionKey(trimmed);
-    if (criteria.some((c) => canonicalCriterionKey(c) === dedupeKey)) {
-      setCriteriaError("その項目はすでに追加されています");
-      return;
-    }
-
-    setCriteria((current) => [...current, trimmed]);
-    setCustomInput("");
+    const nextIndex = bothEmpty
+      ? pairExampleIndex
+      : (pairExampleIndex + 1) % TECHNOLOGY_PAIR_EXAMPLES.length;
+    const next = TECHNOLOGY_PAIR_EXAMPLES[nextIndex];
+    setPairExampleIndex(nextIndex);
+    setItemA(next.itemA);
+    setItemB(next.itemB);
   }
 
   function handleCustomInputKeyDown(event: KeyboardEvent<HTMLInputElement>) {
@@ -116,180 +133,179 @@ export default function NewResearchPage() {
     }
   }
 
-  const reachedMaxCriteria = criteria.length >= MAX_CRITERIA;
-
   return (
     <PageContainer maxWidth={560}>
-      <div style={{ marginBottom: "var(--space-5)" }}>
-        <h1>Compare Technologies</h1>
-        <p style={{ color: "var(--color-text-muted)", marginTop: "var(--space-2)" }}>
-          2つの技術と利用シーンを入力すると、Web上の情報をもとに比較・分析します。
-        </p>
+      <div className="home-hero">
+        <h1>TechCompare AI</h1>
+        <p className="home-hero__tagline">Explore technologies. Compare what fits.</p>
       </div>
 
-      <Card>
-        <form onSubmit={handleSubmit}>
-          <label>
-            Technology A
-            <input
-              value={itemA}
-              onChange={(e) => setItemA(e.target.value)}
-              placeholder="例: FastAPI"
-              required
-              disabled={isSubmitting}
-            />
-          </label>
+      <div className="home-entries">
+        <Link href="/explore" className="home-entry">
+          <span className="home-entry__title">Learn</span>
+          <span className="home-entry__hint">I&apos;m not sure what to compare</span>
+          <span className="home-entry__preview" aria-hidden="true">
+            {EXPLORE_PREVIEW_CATEGORIES}
+          </span>
+        </Link>
 
-          <label>
-            Technology B
-            <input
-              value={itemB}
-              onChange={(e) => setItemB(e.target.value)}
-              placeholder="例: Django"
-              required
-              disabled={isSubmitting}
-            />
-          </label>
+        <button
+          type="button"
+          className="home-entry"
+          aria-expanded={compareExpanded}
+          aria-controls="compare-panel"
+          onClick={() => setCompareExpanded((current) => !current)}
+        >
+          <span className="home-entry__title">Compare</span>
+          <span className="home-entry__hint">I know what to compare</span>
+          <span className="home-entry__preview" aria-hidden="true">
+            Technology A · Technology B · Start comparing →
+          </span>
+        </button>
+      </div>
 
-          <label>
-            利用シーン
-            <input
-              value={goal}
-              onChange={(e) => setGoal(e.target.value)}
-              placeholder="例: AIアプリのバックエンドとして比較したい"
-              required
-              disabled={isSubmitting}
-            />
-          </label>
-
-          <div style={{ marginBottom: "var(--space-5)" }}>
-            <p
-              style={{
-                fontSize: "0.9rem",
-                fontWeight: 600,
-                marginBottom: "var(--space-2)",
-              }}
-            >
-              比較したいポイント({criteria.length} / {MAX_CRITERIA} 選択中)
-            </p>
-            <p
-              style={{
-                fontSize: "0.82rem",
-                color: "var(--color-text-muted)",
-                marginBottom: "var(--space-3)",
-              }}
-            >
-              候補から選ぶか、自由に項目を追加できます。
-            </p>
-
-            <p
-              style={{
-                fontSize: "0.78rem",
-                color: "var(--color-text-subtle)",
-                marginBottom: "var(--space-1)",
-              }}
-            >
-              候補
-            </p>
-            <div className="chip-group" role="group" aria-label="候補の項目">
-              {CRITERION_OPTIONS.map((option) => {
-                const selected = criteria.some(
-                  (c) => canonicalCriterionKey(c) === canonicalCriterionKey(option.key),
-                );
-                return (
-                  <button
-                    key={option.key}
-                    type="button"
-                    className="chip"
-                    aria-pressed={selected}
-                    onClick={() => toggleCriterion(option.key)}
-                    disabled={isSubmitting || (!selected && reachedMaxCriteria)}
-                  >
-                    {option.label}
-                  </button>
-                );
-              })}
-            </div>
-
-            {customChips.length > 0 && (
-              <>
-                <p
-                  style={{
-                    fontSize: "0.78rem",
-                    color: "var(--color-text-subtle)",
-                    marginTop: "var(--space-3)",
-                    marginBottom: "var(--space-1)",
-                  }}
-                >
-                  追加した項目
-                </p>
-                <div className="chip-group" role="group" aria-label="追加した項目">
-                  {customChips.map((text) => (
-                    <button
-                      key={text}
-                      type="button"
-                      className="chip"
-                      aria-pressed="true"
-                      onClick={() => toggleCriterion(text)}
-                      disabled={isSubmitting}
-                      title="クリックして削除"
-                    >
-                      {text} ✕
-                    </button>
-                  ))}
-                </div>
-              </>
-            )}
-
-            <div
-              style={{
-                display: "flex",
-                gap: "var(--space-2)",
-                marginTop: "var(--space-3)",
-              }}
-            >
+      <div
+        id="compare-panel"
+        className={
+          compareExpanded ? "compare-panel compare-panel--expanded" : "compare-panel"
+        }
+        inert={!compareExpanded}
+      >
+        <div className="compare-panel__inner">
+          <form onSubmit={handleSubmit}>
+            <label className="home-tech-field">
+              <span className="home-tech-field__label">Technology A</span>
               <input
-                value={customInput}
-                onChange={(e) => setCustomInput(e.target.value)}
-                onKeyDown={handleCustomInputKeyDown}
-                placeholder="例：検索の柔軟性(Enterで追加)"
-                disabled={isSubmitting || reachedMaxCriteria}
-                style={{ flex: 1, marginBottom: 0 }}
+                value={itemA}
+                onChange={(e) => setItemA(e.target.value)}
+                placeholder="例: FastAPI"
+                required
+                disabled={isSubmitting}
               />
-              <Button
-                type="button"
-                variant="secondary"
-                onClick={addCustomCriterion}
-                disabled={isSubmitting || reachedMaxCriteria}
-              >
-                追加
-              </Button>
+            </label>
+
+            <label className="home-tech-field">
+              <span className="home-tech-field__label">Technology B</span>
+              <input
+                value={itemB}
+                onChange={(e) => setItemB(e.target.value)}
+                placeholder="例: Django"
+                required
+                disabled={isSubmitting}
+              />
+            </label>
+
+            <button
+              type="button"
+              className="use-case-input__example"
+              onClick={handleExampleComparisonClick}
+              disabled={isSubmitting}
+              title="クリックするたびに比較例を切り替え"
+              style={{ display: "block", marginBottom: "var(--space-4)" }}
+            >
+              ↗ Example comparison
+            </button>
+
+            <label>
+              What are you building?
+              <UseCaseInput
+                value={goal}
+                onChange={setGoal}
+                examples={useCaseExamples}
+                placeholder="例: AIアプリのバックエンドとして比較したい"
+                disabled={isSubmitting}
+              />
+            </label>
+
+            <div style={{ marginBottom: "var(--space-5)" }}>
+              <p className="compare-panel__section-label">
+                Base Points · {criteria.length}/{MAX_CRITERIA}
+              </p>
+
+              <div className="chip-group" role="group" aria-label="Base Points">
+                {CRITERION_OPTIONS.map((option) => {
+                  const selected = criteria.some((c) => c === option.label);
+                  return (
+                    <CriterionChip
+                      key={option.label}
+                      label={option.label}
+                      selected={selected}
+                      onToggle={() => toggleCriterion(option.label)}
+                      disabled={isSubmitting || (!selected && reachedMaxCriteria)}
+                      description={option.description}
+                    />
+                  );
+                })}
+              </div>
+
+              <CustomCriteriaChips
+                chips={customChips}
+                onRemove={toggleCriterion}
+                disabled={isSubmitting}
+              />
             </div>
 
-            {criteriaError && (
-              <p
+            <SuggestPointsPanel
+              itemA={itemA}
+              itemB={itemB}
+              goal={goal}
+              basePoints={basePointLabels}
+              criteria={criteriaSelection}
+            />
+
+            <div style={{ margin: "var(--space-5) 0" }}>
+              <p className="compare-panel__section-label">Custom</p>
+              <div
                 style={{
-                  color: "var(--color-danger)",
-                  fontSize: "0.82rem",
+                  display: "flex",
+                  gap: "var(--space-2)",
                   marginTop: "var(--space-2)",
                 }}
               >
-                {criteriaError}
+                <input
+                  value={customInput}
+                  onChange={(e) => setCustomInput(e.target.value)}
+                  onKeyDown={handleCustomInputKeyDown}
+                  placeholder="追加する項目"
+                  title="Enterで追加"
+                  disabled={isSubmitting || reachedMaxCriteria}
+                  style={{ flex: 1, marginBottom: 0 }}
+                />
+                <Button
+                  type="button"
+                  variant="secondary"
+                  onClick={addCustomCriterion}
+                  disabled={isSubmitting || reachedMaxCriteria}
+                >
+                  追加
+                </Button>
+              </div>
+
+              {criteriaError && (
+                <p
+                  style={{
+                    color: "var(--color-danger)",
+                    fontSize: "0.82rem",
+                    marginTop: "var(--space-2)",
+                  }}
+                >
+                  {criteriaError}
+                </p>
+              )}
+            </div>
+
+            {error && (
+              <p style={{ color: "var(--color-danger)", marginBottom: "var(--space-4)" }}>
+                {error}
               </p>
             )}
-          </div>
 
-          {error && (
-            <p style={{ color: "var(--color-danger)", marginBottom: "var(--space-4)" }}>
-              {error}
-            </p>
-          )}
-
-          <Button type="submit" loading={isSubmitting}>
-            Start Research
-          </Button>
-        </form>
-      </Card>
+            <Button type="submit" loading={isSubmitting}>
+              Start Research
+            </Button>
+          </form>
+        </div>
+      </div>
     </PageContainer>
   );
 }

@@ -164,6 +164,30 @@ button {
   cursor: pointer;
 }
 
+/* ==========================================================================
+   UseCaseInput("What are you building?"欄。curatedなexamplesの控えめなhint)
+   ========================================================================== */
+.use-case-input {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.use-case-input__example {
+  align-self: flex-start;
+  background: none;
+  border: none;
+  padding: 0;
+  color: var(--color-text-subtle);
+  font-size: 0.78rem;
+  text-align: left;
+}
+
+.use-case-input__example:hover,
+.use-case-input__example:focus-visible {
+  color: var(--color-accent);
+}
+
 dl {
   display: grid;
   grid-template-columns: auto 1fr;
@@ -387,77 +411,128 @@ dt {
 }
 
 /* ==========================================================================
-   Status timeline(pending / researching / completed / failed の実状態のみ)
+   Research Progress(pending / researching / completed / failed の
+   実状態のみを反映する。業務システム的な多段チェックリストは持たない。
+   Card等の枠線は使わず、余白+motionだけで状態を伝える)
    ========================================================================== */
-.status-timeline {
+.research-screen {
   display: flex;
   flex-direction: column;
-  gap: 0;
+  align-items: center;
+  text-align: center;
+  gap: var(--space-2);
+  padding: var(--space-6) 0;
 }
 
-.status-timeline__item {
+/* Technology A/Bを左右に置き、両側から中央へ情報が集まるような小さなdotで
+   「情報を集めて比較する」ことを示す、TechCompare固有の抽象motion。 */
+.research-motion {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   gap: var(--space-3);
-  min-height: 2.5rem;
-}
-
-.status-timeline__marker-col {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-}
-
-.status-timeline__dot {
-  width: 1.5rem;
-  height: 1.5rem;
-  border-radius: 50%;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 0.75rem;
   font-weight: 700;
-  flex-shrink: 0;
+  font-size: 1.05rem;
+  color: var(--color-text);
 }
 
-.status-timeline__dot--done {
-  background: var(--color-success-subtle);
-  color: var(--color-success);
+.research-motion__track {
+  position: relative;
+  width: 72px;
+  height: 10px;
+  flex: 0 0 auto;
 }
 
-.status-timeline__dot--current {
-  background: var(--color-accent-subtle);
-  color: var(--color-accent);
+.research-motion__dot {
+  position: absolute;
+  top: 50%;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--color-accent);
+  transform: translateY(-50%);
+  opacity: 0;
 }
 
-.status-timeline__dot--upcoming {
-  background: var(--color-bg);
-  color: var(--color-text-subtle);
-  border: 1px solid var(--color-border);
+.research-motion__dot--a {
+  animation: research-converge-from-a 2.4s ease-in-out infinite;
 }
 
-.status-timeline__dot--failed {
-  background: var(--color-danger-subtle);
-  color: var(--color-danger);
+.research-motion__dot--b {
+  animation: research-converge-from-b 2.4s ease-in-out infinite;
+  animation-delay: 0.8s;
 }
 
-.status-timeline__line {
-  width: 2px;
-  flex: 1;
-  min-height: var(--space-4);
-  background: var(--color-border);
-  margin: var(--space-1) 0;
+@keyframes research-converge-from-a {
+  0% {
+    left: 0;
+    opacity: 0;
+  }
+  20% {
+    opacity: 1;
+  }
+  80% {
+    opacity: 1;
+  }
+  100% {
+    left: calc(50% - 3px);
+    opacity: 0;
+  }
 }
 
-.status-timeline__label {
-  padding-top: 0.2rem;
-  font-size: 0.92rem;
-  font-weight: 600;
+@keyframes research-converge-from-b {
+  0% {
+    left: calc(100% - 6px);
+    opacity: 0;
+  }
+  20% {
+    opacity: 1;
+  }
+  80% {
+    opacity: 1;
+  }
+  100% {
+    left: calc(50% - 3px);
+    opacity: 0;
+  }
+}
+
+/* 完了直後のfallback表示・失敗時など、活動中ではない場合は中央に静止させる。 */
+.research-motion--static .research-motion__dot {
+  animation: none;
+  left: calc(50% - 3px);
+  opacity: 0.5;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .research-motion__dot {
+    animation: none;
+    left: calc(50% - 3px);
+    opacity: 0.6;
+  }
+}
+
+.research-status__label {
+  font-weight: 700;
+  font-size: 1.05rem;
+  margin-top: var(--space-1);
+}
+
+.research-status__description {
   color: var(--color-text-muted);
 }
 
-.status-timeline__label--active {
+/* Use Case(何を作りたいか)をResearching…の次に重要な情報として扱う
+   (Phase 5C Finishing 追補v4)。処理説明・経過時間はこれより小さくmutedにする。 */
+.research-status__usecase {
   color: var(--color-text);
+  font-size: 1rem;
+  margin-top: var(--space-1);
+}
+
+.research-status__meta {
+  font-size: 0.8rem;
+  color: var(--color-text-subtle);
+  margin-top: var(--space-2);
 }
 
 /* ==========================================================================
@@ -489,6 +564,108 @@ dt {
 .chip:disabled {
   opacity: 0.5;
   cursor: not-allowed;
+}
+
+/* chip本体(選択トグル)とInfoTooltipの"ⓘ"トリガーを、1つのpillに見える
+   兄弟要素として並べる(HTMLはbutton内buttonを許可しないため、入れ子ではなく
+   隣接要素として実装している。InfoTooltip参照)。 */
+.chip-with-info {
+  display: inline-flex;
+  align-items: stretch;
+}
+
+.chip-with-info .chip {
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+  border-right: none;
+}
+
+.chip-with-info .info-tooltip__trigger {
+  height: 100%;
+  padding: 0 0.6rem;
+  border: 1px solid var(--color-border-strong);
+  border-left: none;
+  border-top-right-radius: var(--radius-full);
+  border-bottom-right-radius: var(--radius-full);
+  background: var(--color-surface);
+  color: var(--color-text-subtle);
+}
+
+.chip-with-info .chip[aria-pressed="true"] + .info-tooltip .info-tooltip__trigger {
+  border-color: var(--color-accent);
+  color: var(--color-accent);
+}
+
+.chip-with-info .chip:disabled + .info-tooltip .info-tooltip__trigger {
+  opacity: 0.5;
+}
+
+/* ==========================================================================
+   InfoTooltip(Base Point / Conceptの短い説明。hover/focus/tapで表示)
+   ========================================================================== */
+.info-tooltip {
+  position: relative;
+  display: inline-flex;
+  vertical-align: middle;
+}
+
+.info-tooltip__trigger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  background: transparent;
+  color: var(--color-text-subtle);
+  font-size: 0.85em;
+  line-height: 1;
+  padding: 0.1rem 0.25rem;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+
+.info-tooltip__trigger:hover,
+.info-tooltip__trigger[aria-expanded="true"] {
+  color: var(--color-accent);
+}
+
+.info-tooltip__trigger:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+}
+
+.info-tooltip__panel {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 50%;
+  width: max-content;
+  max-width: 220px;
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  color: var(--color-text);
+  font-size: 0.78rem;
+  line-height: 1.45;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.08);
+  z-index: 20;
+  pointer-events: none;
+  opacity: 0;
+  visibility: hidden;
+  transform: translate(-50%, 4px);
+  transition: opacity 200ms ease, transform 200ms ease, visibility 200ms;
+}
+
+.info-tooltip__panel--visible {
+  opacity: 1;
+  visibility: visible;
+  transform: translate(-50%, 0);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .info-tooltip__panel {
+    transition: opacity 120ms linear;
+    transform: translate(-50%, 0);
+  }
 }
 
 /* ==========================================================================
@@ -760,4 +937,457 @@ dt {
   color: var(--color-text);
   white-space: pre-wrap;
   line-height: 1.6;
+}
+
+/* ==========================================================================
+   Explore: Technology Map / Category(Phase 5C Finishing 追補v4)
+   カードの枠線・shadow・白背景の存在感を弱め、editorial/minimalな一覧にする。
+   secondary information(question/description)はhover/keyboard focus時だけ
+   ふわっと現れる(hoverの無い端末では常時表示にfallbackする)。
+   ========================================================================== */
+.category-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: var(--space-2);
+}
+
+.category-card__link {
+  display: block;
+}
+
+/* `.card`(白背景・border・shadow)を、このcatalog一覧専用に打ち消す。
+   Comparison Report/Evidence/Compare Setup等、他のCard利用箇所には
+   影響しない(`.card.category-card`という組み合わせでのみ効く)。 */
+.card.category-card {
+  background: transparent;
+  border: none;
+  box-shadow: none;
+  border-radius: var(--radius-md);
+  padding: var(--space-3) var(--space-2);
+  transition: background-color 0.15s ease;
+}
+
+.category-card__link:hover .card.category-card,
+.category-card__link:focus-visible .card.category-card {
+  background: var(--color-accent-subtle);
+}
+
+.category-card__header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-2);
+  margin-bottom: var(--space-1);
+}
+
+.category-card__name {
+  font-size: 1.05rem;
+  font-weight: 700;
+}
+
+.category-card__domain {
+  font-size: 0.85rem;
+  color: var(--color-text-muted);
+}
+
+.category-card__question {
+  font-size: 0.85rem;
+  color: var(--color-text-subtle);
+  padding-top: var(--space-1);
+}
+
+.category-card--disabled {
+  opacity: 0.6;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .category-card__question-wrap {
+    display: grid;
+    grid-template-rows: 0fr;
+    opacity: 0;
+    transform: translateY(-2px);
+    transition: grid-template-rows 200ms ease, opacity 200ms ease, transform 200ms ease;
+  }
+
+  .category-card__question-wrap > p {
+    overflow: hidden;
+  }
+
+  .category-card__link:hover .category-card__question-wrap,
+  .category-card__link:focus-visible .category-card__question-wrap,
+  .category-card--disabled:hover .category-card__question-wrap {
+    grid-template-rows: 1fr;
+    opacity: 1;
+    transform: translateY(0);
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .category-card__question-wrap {
+      transition: none;
+    }
+  }
+}
+
+.technology-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: var(--space-2);
+}
+
+.technology-card__link {
+  display: block;
+}
+
+.card.technology-card {
+  background: transparent;
+  border: none;
+  box-shadow: none;
+  border-radius: var(--radius-md);
+  padding: var(--space-3) var(--space-2);
+  transition: background-color 0.15s ease;
+}
+
+.technology-card__link:hover .card.technology-card,
+.technology-card__link:focus-visible .card.technology-card {
+  background: var(--color-accent-subtle);
+}
+
+.technology-card__name {
+  font-size: 1rem;
+  font-weight: 700;
+}
+
+.technology-card__subcategory {
+  font-size: 0.78rem;
+  color: var(--color-accent);
+  margin-top: var(--space-1);
+}
+
+.technology-card__description {
+  font-size: 0.88rem;
+  color: var(--color-text-muted);
+  padding-top: var(--space-2);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .technology-card__description-wrap {
+    display: grid;
+    grid-template-rows: 0fr;
+    opacity: 0;
+    transform: translateY(-2px);
+    transition: grid-template-rows 200ms ease, opacity 200ms ease, transform 200ms ease;
+  }
+
+  .technology-card__description-wrap > p {
+    overflow: hidden;
+  }
+
+  .technology-card__link:hover .technology-card__description-wrap,
+  .technology-card__link:focus-visible .technology-card__description-wrap {
+    grid-template-rows: 1fr;
+    opacity: 1;
+    transform: translateY(0);
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .technology-card__description-wrap {
+      transition: none;
+    }
+  }
+}
+
+/* ==========================================================================
+   Technology Detail(Phase 5C Finishing 追補v4)
+   白いCardの縦積みをやめ、hairline区切りの1本の読み物のように見せる。
+   ========================================================================== */
+.tech-detail__section {
+  padding: var(--space-4) 0;
+  border-top: 1px solid var(--color-border);
+}
+
+.tech-detail__section:first-child {
+  border-top: none;
+  padding-top: 0;
+}
+
+.where-it-fits {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-1);
+}
+
+.where-it-fits__layer {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  font-weight: 600;
+}
+
+.where-it-fits__arrow {
+  color: var(--color-text-subtle);
+  font-weight: 400;
+}
+
+.chip--link {
+  display: inline-flex;
+}
+
+.chip--link:hover {
+  background: var(--color-accent-subtle);
+  border-color: var(--color-accent);
+  color: var(--color-accent);
+}
+
+.chip--muted {
+  color: var(--color-text-subtle);
+}
+
+/* ==========================================================================
+   ConceptPopover(Phase 5C)
+   ========================================================================== */
+.concept-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+/* Concept名自体がInfoTooltipのtriggerを兼ねる(選択操作を持たないため、
+   Base Point chipのような独立"ⓘ"は不要。hover/focus/tapで同じ`InfoTooltip`
+   panelが浮かぶ。`components/ConceptPopover.tsx`参照)。 */
+.concept-popover .info-tooltip__trigger {
+  font-size: 0.88rem;
+  font-weight: 600;
+  color: var(--color-accent);
+  padding: 0;
+  text-decoration: underline dotted;
+  text-underline-offset: 3px;
+}
+
+/* ==========================================================================
+   Compare Setup(Phase 5C)
+   ========================================================================== */
+.compare-setup__vs {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+}
+
+.compare-setup__side {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-2);
+}
+
+.compare-setup__side-name {
+  font-size: 1.1rem;
+  font-weight: 700;
+}
+
+.compare-setup__vs-label {
+  font-size: 0.8rem;
+  font-weight: 700;
+  color: var(--color-text-subtle);
+  flex-shrink: 0;
+}
+
+@media (max-width: 480px) {
+  .compare-setup__vs {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: var(--space-3);
+  }
+}
+
+/* ==========================================================================
+   Suggest Points(Phase 5C)
+   ========================================================================== */
+.suggest-points__header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+}
+
+.suggest-points__hint {
+  font-size: 0.82rem;
+  color: var(--color-text-muted);
+  margin-top: var(--space-2);
+}
+
+.suggest-points__error {
+  font-size: 0.85rem;
+  color: var(--color-danger);
+  margin-top: var(--space-2);
+}
+
+.ai-suggestion-list {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  margin-top: var(--space-3);
+}
+
+.ai-suggestion-item {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-1);
+}
+
+.ai-suggestion-item__reason {
+  font-size: 0.82rem;
+  color: var(--color-text-muted);
+}
+
+/* ==========================================================================
+   Home: 中央揃えのhero + Explore/Compareという2つの同格の入口
+   (Phase 5C Finishing 追補v2)
+   ========================================================================== */
+.home-hero {
+  text-align: center;
+  margin-bottom: var(--space-6);
+}
+
+.home-hero__tagline {
+  color: var(--color-text-muted);
+  margin-top: var(--space-2);
+}
+
+.home-entries {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: var(--space-7);
+  margin-bottom: var(--space-6);
+}
+
+/* 枠線ボックスではなく余白ベースの入口。hover/focus-visible時だけ、その
+   側の背景・文字・矢印がごく控えめに変化する(レイアウトは動かさない)。 */
+.home-entry {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-1);
+  padding: var(--space-4) var(--space-5);
+  min-width: 200px;
+  border: none;
+  border-radius: var(--radius-md);
+  background: none;
+  color: inherit;
+  text-align: center;
+  text-decoration: none;
+  transition: background-color 0.15s ease;
+}
+
+.home-entry:hover,
+.home-entry:focus-visible {
+  background: var(--color-accent-subtle);
+}
+
+.home-entry__title {
+  font-weight: 700;
+  font-size: 1.05rem;
+  color: var(--color-text);
+}
+
+.home-entry:hover .home-entry__title,
+.home-entry:focus-visible .home-entry__title {
+  color: var(--color-accent);
+}
+
+.home-entry__hint {
+  font-size: 0.85rem;
+  color: var(--color-text-muted);
+}
+
+.home-entry:hover .home-entry__hint,
+.home-entry:focus-visible .home-entry__hint {
+  color: var(--color-accent);
+}
+
+/* hover previewはdesktopのenhancement。実hoverを持たない端末(mobile)では
+   常に無効にし、通常のclick/tapだけで意味が通るようにする。 */
+.home-entry__preview {
+  position: absolute;
+  top: 100%;
+  left: 50%;
+  transform: translate(-50%, -4px);
+  margin-top: var(--space-2);
+  width: max-content;
+  max-width: 260px;
+  font-size: 0.78rem;
+  color: var(--color-text-subtle);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 200ms ease, transform 200ms ease;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .home-entry:hover .home-entry__preview,
+  .home-entry:focus-visible .home-entry__preview {
+    opacity: 1;
+    transform: translate(-50%, 0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .home-entry,
+  .home-entry__title,
+  .home-entry__hint,
+  .home-entry__preview {
+    transition: none;
+  }
+}
+
+/* ==========================================================================
+   Compare panel(Homeにinline展開する。枠線のCardは使わず余白のみで区切る)
+   ========================================================================== */
+.compare-panel {
+  display: grid;
+  grid-template-rows: 0fr;
+  opacity: 0;
+  transition: grid-template-rows 250ms ease, opacity 200ms ease;
+}
+
+.compare-panel--expanded {
+  grid-template-rows: 1fr;
+  opacity: 1;
+}
+
+.compare-panel__inner {
+  overflow: hidden;
+}
+
+.compare-panel__section-label {
+  font-size: 0.9rem;
+  font-weight: 600;
+  margin-bottom: var(--space-2);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .compare-panel {
+    transition: none;
+  }
+}
+
+/* Technology A/Bは小さな補助ラベルとして扱い、入力されている技術名の方が
+   主役に見えるようにする(Phase 5C Finishing 追補v4)。 */
+.home-tech-field__label {
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: var(--color-text-subtle);
+}
+
+.home-tech-field input {
+  font-size: 1.05rem;
+  font-weight: 600;
+  color: var(--color-text);
 }

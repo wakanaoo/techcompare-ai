@@ -5,10 +5,7 @@ import { useParams, useRouter } from "next/navigation";
 
 import { Alert } from "@/components/Alert";
 import { Button } from "@/components/Button";
-import { Card } from "@/components/Card";
 import { PageContainer } from "@/components/PageContainer";
-import { Spinner } from "@/components/Spinner";
-import { StatusTimeline } from "@/components/StatusTimeline";
 import { useElapsedSeconds } from "@/hooks/useElapsedSeconds";
 import { createResearch, getResearch, type Research } from "@/lib/api";
 import { getFriendlyErrorMessage } from "@/lib/errorMessages";
@@ -141,88 +138,60 @@ export default function ResearchProgressPage() {
 
   return (
     <PageContainer maxWidth={560}>
-      <h1 style={{ marginBottom: "var(--space-5)" }}>Research Progress</h1>
-
-      {isLoading && (
-        <Card>
-          <p style={{ color: "var(--color-text-muted)" }}>読み込み中…</p>
-        </Card>
-      )}
+      {isLoading && <p style={{ color: "var(--color-text-muted)" }}>読み込み中…</p>}
 
       {error && (
         <Alert tone="danger" title="読み込みに失敗しました" details={error} />
       )}
 
       {research && (
-        <Card>
-          <p style={{ fontWeight: 700, fontSize: "1.05rem" }}>
-            {research.item_a} vs {research.item_b}
-          </p>
-          <p
-            style={{
-              color: "var(--color-text-muted)",
-              marginTop: "var(--space-1)",
-              marginBottom: "var(--space-5)",
-            }}
-          >
-            {research.goal}
-          </p>
-
-          <StatusTimeline status={research.status} />
-
+        <div className="research-screen">
           <div
-            style={{
-              marginTop: "var(--space-5)",
-              paddingTop: "var(--space-4)",
-              borderTop: "1px solid var(--color-border)",
-            }}
+            className={isActive ? "research-motion" : "research-motion research-motion--static"}
+            aria-hidden="true"
           >
-            {research.status === "researching" && (
-              <div style={{ display: "flex", alignItems: "center", gap: "var(--space-2)" }}>
-                <Spinner label="処理中" />
-                <p>{STATUS_DESCRIPTION.researching}</p>
-              </div>
-            )}
+            <span>{research.item_a}</span>
+            <span className="research-motion__track">
+              <span className="research-motion__dot research-motion__dot--a" />
+              <span className="research-motion__dot research-motion__dot--b" />
+              <span
+                className="research-motion__dot research-motion__dot--a"
+                style={{ animationDelay: "1.6s" }}
+              />
+            </span>
+            <span>{research.item_b}</span>
+          </div>
 
-            {research.status === "pending" && <p>{STATUS_DESCRIPTION.pending}</p>}
+          <div role="status" aria-live="polite">
+            {isActive && (
+              <>
+                <p className="research-status__label">Researching…</p>
+                <p className="research-status__usecase">{research.goal}</p>
+                <p className="research-status__meta">
+                  {STATUS_DESCRIPTION[research.status]} · {elapsedSeconds}秒
+                </p>
+              </>
+            )}
 
             {research.status === "completed" &&
               (showViewReportFallback ? (
                 <div>
                   <p style={{ fontWeight: 700 }}>Research Complete</p>
-                  <p
-                    style={{
-                      color: "var(--color-text-muted)",
-                      marginTop: "var(--space-1)",
-                    }}
-                  >
-                    レポートを準備しています…
-                  </p>
+                  <p className="research-status__description">レポートを準備しています…</p>
                   <div style={{ marginTop: "var(--space-3)" }}>
                     <Button href={`/research/${params.id}/result`}>View Report →</Button>
                   </div>
                 </div>
               ) : (
-                <p>{STATUS_DESCRIPTION.completed}</p>
+                <p className="research-status__description">{STATUS_DESCRIPTION.completed}</p>
               ))}
-
-            {isActive && (
-              <p
-                style={{
-                  marginTop: "var(--space-2)",
-                  fontSize: "0.85rem",
-                  color: "var(--color-text-subtle)",
-                }}
-              >
-                完了まで数十秒かかることがあります。このままお待ちください。
-                <br />
-                調査開始からの経過時間: {elapsedSeconds}秒
-              </p>
-            )}
           </div>
 
           {research.status === "failed" && friendlyError && (
-            <div style={{ marginTop: "var(--space-4)" }}>
+            <div style={{ marginTop: "var(--space-4)", textAlign: "left" }}>
+              <p className="research-status__description" style={{ textAlign: "center" }}>
+                {STATUS_DESCRIPTION.failed}
+              </p>
               <Alert
                 tone="danger"
                 title={friendlyError.headline}
@@ -259,7 +228,7 @@ export default function ResearchProgressPage() {
               </div>
             </div>
           )}
-        </Card>
+        </div>
       )}
     </PageContainer>
   );

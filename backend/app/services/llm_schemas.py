@@ -61,3 +61,16 @@ class ComparisonReportResult(BaseModel):
 
     recommendation: RecommendationResult
     comparisons: list[ComparisonCriterionResult]
+
+
+class CriterionSuggestionItem(BaseModel):
+    """Suggest Points(POST /suggest-criteria)の提案1件。"""
+
+    name: str = Field(..., description="追加/優先すべき比較ポイントの名前(日本語、短く)")
+    reason: str = Field(..., description="このuse caseでなぜ重要かを1文程度で(日本語)")
+
+
+class CriteriaSuggestionsResult(BaseModel):
+    """Suggest PointsでLLMから受け取るStructured Output全体の形。"""
+
+    suggestions: list[CriterionSuggestionItem]

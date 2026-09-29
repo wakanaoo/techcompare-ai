@@ -4,20 +4,13 @@ DBモデル(app/models/research.py)とは別に定義することで、
 「DBの内部構造」と「APIとして外に見せる形」を分離している。
 """
 
-import re
 from datetime import datetime
 from enum import Enum
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from app.schemas.criteria import canonical_key_for
-
-# 比較軸(criteria)に許可しない制御文字(改行・タブ・DEL等)。
-# 自由入力のcriterionがGeminiへのprompt構造に意図せず混入するのを防ぐ
-# 簡易的な対策。
-_CONTROL_CHAR_PATTERN = re.compile(r"[\x00-\x1f\x7f]")
-_MAX_CRITERION_LENGTH = 40
+from app.schemas.criteria import canonical_key_for, validate_criterion_text
 
 
 class ResearchStatus(str, Enum):
@@ -66,22 +59,17 @@ class ResearchCreate(BaseModel):
         固定候補のkey("cost")とlabel("コスト")のように表記は異なるが
         意味的には同じcriterionも重複として扱う(既存の固定key↔label対応
         だけが対象。類義語判定やLLMによる意味判定はしない)。
+
+        trim・長さ・制御文字の検証自体はapp/schemas/criteria.py::
+        validate_criterion_text()に集約している(Phase 5CのAI提案
+        (POST /suggest-criteria)側のdefense-in-depth検証と同じルールを
+        共有するため)。
         """
         normalized: list[str] = []
         seen: set[str] = set()
 
         for raw in value:
-            trimmed = raw.strip()
-
-            if not trimmed:
-                raise ValueError("比較軸を空文字にすることはできません。")
-            if len(trimmed) > _MAX_CRITERION_LENGTH:
-                raise ValueError(
-                    f"比較軸は{_MAX_CRITERION_LENGTH}文字以内で入力してください: {trimmed[:20]}..."
-                )
-            if _CONTROL_CHAR_PATTERN.search(trimmed):
-                raise ValueError("比較軸に改行や制御文字を含めることはできません。")
-
+            trimmed = validate_criterion_text(raw)
             dedupe_key = canonical_key_for(trimmed)
             if dedupe_key in seen:
                 raise ValueError(f"比較軸が重複しています: {trimmed}")

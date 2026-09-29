@@ -23,6 +23,12 @@ Phase 4.1: rate-limit resilienceについて
   - _compute_backoff_seconds(): 429/503のretry待機時間を、Gemini
     APIレスポンスにRetry-Afterヘッダがあればそれを優先し、無ければ
     指数バックオフ+jitterで計算する。
+
+Phase 5C: Suggest Points(POST /suggest-criteria)について
+generate_comparison()と同じpacing/backoff/retry基盤(_generate_structured()）
+を共有しつつ、リトライ回数だけ変える(補助機能であるSuggest Pointsは同期
+HTTPリクエストでユーザーを待たせるため、最大2 attemptsに抑える。既存の
+comparison生成側の最大3 attemptsは変更しない)。
 """
 
 import random
@@ -32,9 +38,11 @@ from google import genai
 from google.genai import errors as genai_errors
 from google.genai import types
 
+from pydantic import BaseModel
+
 from app.core.config import settings
-from app.schemas.criteria import label_for
-from app.services.llm_schemas import ComparisonReportResult
+from app.schemas.criteria import CONTROL_CHAR_PATTERN, MAX_CRITERION_LENGTH, label_for
+from app.services.llm_schemas import ComparisonReportResult, CriteriaSuggestionsResult
 from app.services.search_client import SearchResultItem
 
 # 2026年9月時点で新規ユーザーが利用できる安定版Flashモデル。
@@ -53,7 +61,14 @@ _PROMPT_CONTENT_MAX_LENGTH = 800
 # 複数回発生したことを受けて追加した。
 # 400/401/403/404等、retryしても解決しないエラーは対象外(即座に例外を送出する)。
 # Celery/RQ等の本格的なジョブキューは導入せず、この関数内で完結させている。
-_MAX_ATTEMPTS = 3  # 初回呼び出し + 最大2回のretry
+_COMPARISON_MAX_ATTEMPTS = 3  # 初回呼び出し + 最大2回のretry
+
+# Suggest Points(POST /suggest-criteria)用。補助機能であり、ユーザーが
+# 同期HTTPリクエストを待つため、comparison生成より少ない回数に抑える
+# (初回呼び出し + 最大1回のretry)。失敗した場合はsanitized errorを
+# 返し、ユーザー自身がボタンを再度押して再試行できるようにする
+# (frontend側、SuggestPointsPanelで対応)。
+_SUGGESTION_MAX_ATTEMPTS = 2
 
 
 def _is_retryable_error(exc: Exception) -> bool:
@@ -177,6 +192,47 @@ def _build_prompt(
 - 出力は指定されたスキーマの形式のみで返すこと。"""
 
 
+def _generate_structured(
+    client: genai.Client,
+    prompt: str,
+    response_schema: type[BaseModel],
+    max_attempts: int,
+) -> BaseModel:
+    """Gemini APIをstructured outputで呼び出す共通処理。
+
+    pace_gemini_request()によるペース管理、429/503のretry(指数バックオフ+
+    jitter、Retry-Afterヘッダ優先)、malformed responseの検出をここに
+    集約する。呼び出し元(generate_comparison() / generate_criteria_
+    suggestions())は、response_schemaとmax_attemptsだけを渡して使い分ける
+    (Suggest Pointsはユーザーが同期HTTPリクエストを待つ補助機能のため、
+    comparison生成より少ないmax_attemptsを渡す。既存のcomparison生成側の
+    挙動・回数はこの共通化によって変えない)。
+    """
+    for attempt in range(max_attempts):
+        pace_gemini_request()
+        try:
+            response = client.models.generate_content(
+                model=MODEL,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    response_schema=response_schema,
+                ),
+            )
+            break
+        except (genai_errors.ServerError, genai_errors.ClientError) as exc:
+            is_last_attempt = attempt == max_attempts - 1
+            if not _is_retryable_error(exc) or is_last_attempt:
+                raise
+            time.sleep(_compute_backoff_seconds(attempt, exc))
+
+    result = response.parsed
+    if not isinstance(result, response_schema):
+        # malformed response: スキーマに沿わない/パースできなかった場合。
+        raise ValueError("LLMの応答を期待した形式に変換できませんでした(malformed response)。")
+    return result
+
+
 def generate_comparison(
     item_a: str,
     item_b: str,
@@ -197,27 +253,79 @@ def generate_comparison(
     # どちらを見るか変わりうる)に依存せず、Settings経由で読んだキーを明示的に渡す。
     client = genai.Client(api_key=settings.gemini_api_key)
     prompt = _build_prompt(item_a, item_b, goal, criteria, sources)
+    return _generate_structured(
+        client, prompt, ComparisonReportResult, _COMPARISON_MAX_ATTEMPTS
+    )
 
-    for attempt in range(_MAX_ATTEMPTS):
-        pace_gemini_request()
-        try:
-            response = client.models.generate_content(
-                model=MODEL,
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    response_mime_type="application/json",
-                    response_schema=ComparisonReportResult,
-                ),
-            )
-            break
-        except (genai_errors.ServerError, genai_errors.ClientError) as exc:
-            is_last_attempt = attempt == _MAX_ATTEMPTS - 1
-            if not _is_retryable_error(exc) or is_last_attempt:
-                raise
-            time.sleep(_compute_backoff_seconds(attempt, exc))
 
-    result = response.parsed
-    if not isinstance(result, ComparisonReportResult):
-        # malformed response: スキーマに沿わない/パースできなかった場合。
-        raise ValueError("LLMの応答を期待した形式に変換できませんでした(malformed response)。")
-    return result
+def _sanitize_existing_criteria_for_prompt(existing_criteria: list[str]) -> list[str]:
+    """Suggest Pointsのprompt埋め込み用に、existing_criteriaを軽く正規化する。
+
+    ここはAPI層(app/api/suggestions.py → app/services/suggestion_service.py)
+    が最終的なbackend側validationを担うため、ここでは例外を送出せず、
+    不正な要素(空文字・制御文字混入・長すぎる文字列)は静かに読み飛ばす
+    (prompt構造への意図しない混入を防ぐ簡易的な対策)。
+    """
+    sanitized: list[str] = []
+    for raw in existing_criteria:
+        trimmed = raw.strip()
+        if not trimmed or len(trimmed) > MAX_CRITERION_LENGTH:
+            continue
+        if CONTROL_CHAR_PATTERN.search(trimmed):
+            continue
+        sanitized.append(trimmed)
+    return sanitized
+
+
+def _build_suggestion_prompt(
+    item_a: str, item_b: str, goal: str, existing_criteria: list[str]
+) -> str:
+    sanitized_existing = _sanitize_existing_criteria_for_prompt(existing_criteria)
+    existing_lines = (
+        "\n".join(f"- {c}" for c in sanitized_existing)
+        if sanitized_existing
+        else "(なし)"
+    )
+
+    return f"""あなたはソフトウェア技術の比較調査を支援するアシスタントです。
+
+技術A: {item_a}
+技術B: {item_b}
+利用目的: {goal}
+
+すでに比較の候補として提示されている項目(existing criteria):
+{existing_lines}
+
+指示:
+- existing criteriaはすでに候補として存在するため、それと同じ、または
+  明らかに重複する観点は提案しないこと。
+- この利用目的だからこそ重要になる、追加または優先すべき比較ポイントを
+  最大5件提案すること。
+- 各提案には、名前(name。日本語、短く、体言止め程度)と、この利用目的で
+  なぜ重要かの理由(reason。日本語、1文程度)を付けること。
+- 意味的な類義語の判定に神経質になる必要はないが、existing criteriaと
+  ほぼ同じ言い換えは避けること。
+- 出力は指定されたスキーマの形式のみで返すこと。"""
+
+
+def generate_criteria_suggestions(
+    item_a: str,
+    item_b: str,
+    goal: str,
+    existing_criteria: list[str],
+) -> CriteriaSuggestionsResult:
+    """Suggest Points(POST /suggest-criteria)用に、LLMを1回(一時的な
+    エラー時は最大1回まで追加でretryして)呼び出し、検証済みの
+    CriteriaSuggestionsResultを返す。
+
+    Tavilyは呼ばない・Research/Source/Evidenceは作らない(このモジュールの
+    責務はGemini呼び出しのみ)。GEMINI_API_KEYが未設定/無効な場合や、
+    retryしても解決しない場合はgoogle.genai.errorsの例外がそのまま送出
+    される(呼び出し元のapp/api/suggestions.pyでsanitized errorとして
+    処理する)。
+    """
+    client = genai.Client(api_key=settings.gemini_api_key)
+    prompt = _build_suggestion_prompt(item_a, item_b, goal, existing_criteria)
+    return _generate_structured(
+        client, prompt, CriteriaSuggestionsResult, _SUGGESTION_MAX_ATTEMPTS
+    )
