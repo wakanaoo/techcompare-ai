@@ -290,13 +290,196 @@ Brave Search APIも検討しましたが、2026年2月に無料枠が廃止さ�
 - `search_depth="basic"`を明示し、`auto_parameters=False`にしています。
   Tavilyの`auto_parameters`を有効にしたままだと、検索内容によっては
   勝手に`search_depth="advanced"`(2クレジット消費)に昇格することがあるため、
-  明示的に`basic`(1クレジット消費)へ固定しています。
-- `max_results=3`で、item_a・item_bそれぞれ上位3件までに制限しています
-  (1 Researchあたり最大6件の情報源、最大6クレジット消費)。
+  明示的に`basic`(1クエリ=1クレジット消費)へ固定しています。
+- 1クエリあたり最終的に採用するのは上位3件です。Tavilyへのリクエスト自体は
+  Phase 5D-bから`max_results=8`に広げていますが、これは「候補プールを広げて
+  再ランキングする」ためであり(詳細は後述のPhase 5D-bセクション参照)、
+  採用件数・保存するSource数(1 Researchあたり最大9件)は変わりません。
+
+> **旧版の記述について**: 以前このセクションには「1 Researchあたり最大6件の
+> 情報源、最大6クレジット消費」という記述がありましたが、これは「6件の
+> 情報源」と「クレジット消費」を混同した誤記でした。Tavily `basic`検索は
+> クエリ1回=1クレジットであり、情報源の件数(`max_results`)自体はcrediteに
+> 影響しません。Phase 3時点は1 Researchあたり2クエリ=2クレジット
+> (下記「実行方法」のPhase 4 README記載、Tavily 30回/15ケースと整合)。
+> この前提(`max_results`はクレジット消費に影響しない)は、Phase 5D-bで
+> `max_results`を3→8に広げる際の設計判断の根拠にもなっている。ただし
+> これはTavilyの料金ページの記載に基づく前提であり、料金体系の変更が
+> あった場合は再確認が必要(呼び出し回数自体は3回/researchのまま変わらない
+> ため、影響があるとしても限定的)。
+
 - `include_raw_content="text"`で、ページの実際の本文(プレーンテキスト)を
   取得しています。これはLLMに自由に引用文を生成させず、Evidence Viewerで
   表示する根拠本文を「実際にWeb上にあったテキスト」にするためです
   (詳細は次のセクション参照)。
+
+#### Phase 5D: 検索クエリにTechnology × Use Case × Comparison Pointを反映する
+
+Phase 3時点のクエリは`"{技術名} 公式ドキュメント"`で、goal(利用目的)・
+criteria(比較軸)を一切反映していなかった(Evidenceのノイズの主因の1つ)。
+Phase 5Dから、1 Researchあたり**常に3クエリ**(`app/services/search_client.py::
+build_search_queries()`)に固定する(criteria件数に比例させない。
+5criteria×2technologies=10クエリのような設計にはしない):
+
+| クエリ | 内容 |
+|---|---|
+| item_a向け | `"{item_a} {criteria labels} {goal} 公式ドキュメント"` |
+| item_b向け | `"{item_b} {criteria labels} {goal} 公式ドキュメント"` |
+| 比較記事向け | `"{item_a} vs {item_b} {criteria labels} {goal}"` |
+
+goalがどれか1クエリだけに偏らないよう、3クエリすべてにcriteria/goalを
+含める。criteria/goalはクエリが過度に長くならないよう決定論的に(LLMは
+使わず)一定文字数で切り詰める。3クエリ分の結果はURLで重複排除してから
+`Source`として保存する。1 Researchあたり2→3クレジットへの増加(15ケース
+のFull Evaluationで30→45クレジット)は、Tavily無料枠(月1,000クレジット)
+の範囲内。
+
+#### Phase 5D-b: 検索結果のrankingで公式/一次情報を優先する
+
+**きっかけ**: Phase 5Dの設計原則には「公式/一次情報の優先」を掲げていたが、
+実際にFlask vs FastAPIで実API smoke testを行ったところ、クエリに`"公式ドキュメント"`という語を含めて
+いるにもかかわらず、取得した9件のSourceに公式ドキュメント
+(`flask.palletsprojects.com` / `fastapi.tiangolo.com`)が**1件も含まれて
+いなかった**。原因は、Tavilyへのリクエスト自体が`max_results=3`(採用
+件数と同じ)だったため、rankingで並べ替えても「候補プールの外」にある
+公式ドキュメントを拾い上げる余地が最初から無かったこと。
+
+**対策**: `app/services/search_client.py`で、Tavilyへリクエストする候補件数
+(`_FETCH_RESULTS_PER_QUERY = 8`)と、実際に採用する件数
+(`MAX_RESULTS_PER_QUERY = 3`、従来どおり)を分離した。
+
+- Tavily呼び出し回数は**3回/researchのまま変更しない**(クエリ本文
+  `build_search_queries()`も変更しない)。1クエリあたりの`max_results`を
+  3→8に広げるだけ(=候補プールを広げて、再ランキングで拾える範囲を
+  広げる)。
+- 採用件数は従来どおり上位3件のまま(=保存するSource数・Geminiプロンプト
+  に入るchunk数は変わらない)。
+- 「公式/一次情報らしさ」は、`_official_source_bonus()`という新しいpure
+  functionで、以下の2種類の**技術に依存しないルールのみ**を加点対象にする
+  (技術ごとに公式ドメインを手動登録するテーブルは作らない):
+  1. **技術名がホスト名に含まれるか**: `item_a`/`item_b`(例: "FastAPI")を
+     正規化した文字列が、URLホスト名のいずれかのラベルに含まれるかを
+     実行時に計算する(例: `fastapi.tiangolo.com`のラベル`"fastapi"`に
+     完全一致、`docs.djangoproject.com`のラベル`"djangoproject"`が
+     `"django"`を部分文字列として含む、など)。判定対象はホスト名のみで、
+     パスは見ない(第三者記事のパスに技術名が含まれるだけで「公式」扱い
+     しないため)。
+  2. **技術非依存の汎用的なドキュメントホスティングパターン**:
+     `readthedocs.io`等、多数の技術で共通して使われる配信基盤・命名規約
+     (`docs.`で始まるホスト名、`/docs/`を含むパス等)。既存の集約系
+     ドメインへの軽いペナルティ(`_SOFT_DEPRIORITIZED_DOMAINS`)と対になる、
+     技術非依存で保守コストが技術数に比例しないリスト。
+- このボーナス(上限0.15)は**Tavily自身のrelevance score(概ね0〜1)を
+  置き換えるものではなく**、relevanceが拮抗している候補同士の中でのみ
+  公式/一次情報を一段押し上げる弱いsignalとして扱う。relevanceの差が
+  大きい場合(例: 公式ドメインのscoreが第三者ソースより0.2以上低い場合)は、
+  公式ドメインであっても高relevanceの第三者ソースを追い越さない。
+- ハードなフィルタではないため、第三者の比較記事・解説記事を除外することは
+  しない。公式ドメインが見つからない場合は従来どおりTavily scoreベースの
+  並び順のままで、公式ドメインが1件見つかった場合も残りの枠は引き続き
+  通常のranking結果(第三者ソース)から選ばれる。
+
+| | Phase 5D | Phase 5D-b |
+|---|---|---|
+| Tavily呼び出し回数/research | 3回 | **3回(変更なし)** |
+| 1クエリあたりの`max_results` | 3 | 8(候補プールのみ拡大) |
+| 1クエリあたり採用する件数 | 3 | **3(変更なし)** |
+| Tavily credit/research | 3 credit | **3 creditのまま(同じ前提)** |
+| 保存するSource数/research | 最大9件 | **最大9件(変更なし)** |
+| Geminiプロンプトに入るchunk数 | 変更なし | **変更なし** |
+| Gemini呼び出し回数/research | 1回 | **1回(変更なし)** |
+
+#### Phase 5D-c: Query Languageの戦略(検索言語の切り分け)
+
+Phase 5D-b実装後の実API smoke testで、Flask公式ドキュメント
+(`flask.palletsprojects.com`)がcandidate pool自体に1件も入らない事例を
+確認した。切り分け実験の結果、原因はrerankingではなく**日本語の
+criteria/goalを含む長いクエリが、英語中心の公式ドキュメントのcandidate
+retrieval自体を妨げていること**だと判明した(同内容を英語化したクエリ、
+または`"Flask official documentation"`のような短い英語クエリでは、
+いずれも公式ドメインが1位で返ってきた)。
+
+対策として、3クエリの役割を分担する:
+
+| クエリ | 役割 | 言語 |
+|---|---|---|
+| item_a向け | official/primary retrieval | 英語中心(技術名+固定criteriaの英語search term+`"official documentation"`) |
+| item_b向け | official/primary retrieval | 英語中心(同上) |
+| 比較記事向け | third-party comparison retrieval | 日本語(JP criteria label+JP goal、Phase 5D/5D-bから変更なし) |
+
+固定criteria(`app/schemas/criteria.py::Criterion`)にのみ、1 criterionに
+つき1語/1フレーズの英語search term対訳表(`CRITERION_ENGLISH_SEARCH_TERMS`)
+を用意する(関連語への拡張はしない。query languageの効果とcriteria
+keyword拡張の効果を混同しないため)。custom criteria(自由入力)は
+正確な英訳を保証できないためitem_a/item_b向けクエリには含めず、比較
+記事向けクエリにのみ日本語labelとして含める。Tavily呼び出し回数
+(3回/research)・Gemini呼び出し回数(1回/research)はいずれも変更しない。
+query翻訳のための追加LLM呼び出しも行わない。
+
+実データ検証(Flask vs FastAPI)で、`flask.palletsprojects.com`が
+candidate poolの生順位2位→reranking後1位、`fastapi.tiangolo.com`が
+生順位4位→reranking後3位で、いずれも採用top3入りすることを確認した。
+
+#### Phase 5D-d: Evidence Chunk Boundary(文途中で切れるEvidenceの修正)
+
+実API smoke testで、Evidence本文(verbatim、改ざんなし)が文の途中や
+Markdown表の行の途中で終わっている事例を2件確認した。原因は2つ:
+
+1. `chunk_content()`が、単なる行折り返し(文末記号を伴わない改行)まで
+   文の区切りとして扱っていた(例: `"...with the ability to scale up to\n
+   complex applications."`という1文が、改行位置で2つのchunkに分断されて
+   いた)。
+2. `_PROMPT_CONTENT_MAX_LENGTH`(800文字)による機械的な末尾切り詰めが、
+   文やMarkdown表の行の途中でSource.contentを寸断することがあり、
+   `chunk_content()`がその切れ端を無条件に「完結したchunk」として返して
+   いた。
+
+対策(いずれも`app/services/search_client.py`、既存のverbatim保証・
+noise filteringのロジックは変更しない):
+
+- 区切りとして扱うのは、文末記号の直後・Markdown表の行末(`|`)の直後の
+  改行・2つ以上連続する改行(段落区切り)のみとし、単なる行折り返しの
+  単独改行では区切らない(`_CHUNK_BOUNDARY_PATTERN`)。
+- `get_source_chunks()`が、実際に`_PROMPT_CONTENT_MAX_LENGTH`による
+  truncationが発生した場合のみ、末尾chunkが文末記号/表の行末のいずれでも
+  終わっていなければ、その1件を安全側に除外する。truncationが発生して
+  いない場合(見出しのみの短いページ等)は、句点が無くても正常な終端として
+  残す(「chunk数」ではなく「実際にtruncationが起きたか」で判断する)。
+
+#### Phase 5D-e: Claim Grounding(prompt-onlyの最小対策)
+
+実API smoke testで、Evidence(verbatim)自体は正しいにもかかわらず、
+AI summaryが述べる具体的な数値がEvidenceの内容と食い違う事例を確認した
+(例: summaryは「Flaskは10年以上の歴史」、実際に引用したEvidenceは
+「15年以上」「14年」)。原因は、(1) Structured Outputのフィールド順序上
+summaryが先・citationsが後に生成されるため、summaryの具体的な数値が
+事前学習知識由来である可能性を排除できないこと、(2) 従来のプロンプトが
+「情報源に明確な記載がない場合は一般的な知識を参考程度に述べてもよい」と
+許可しており、この「一般的な知識」と「情報源に基づく記述」が同じ
+summary文字列内で区別なく混在しうること。
+
+対策として`_build_prompt()`のinstructionsのみを変更した(schema・
+research_runner.py・DB schema・公開APIは変更しない。Gemini/Tavily
+呼び出し回数も変更しない):
+
+- item_a_summary/item_b_summaryは、提供されたchunkで実際に支持できる
+  内容だけを書く。具体的な数値・固有の事実は、citationとして選ぶchunkに
+  実際に書かれている場合にのみ書く。
+- 複数の情報源で数値が食い違う場合は、無理にどちらか1つを採用せず、
+  安全に支持できる定性的な表現に留める。
+- 情報源に記載が無い場合も、一般的な知識で数値・固有の事実を補わない
+  (旧い「参考程度に述べてもよい」という許可を削除)。
+- `recommendation`は、各比較軸の(情報源に基づく)結果をもとにAIが
+  解釈・総合判断する別の層であり、個々のcitationは不要、という役割
+  分離を明示する(既存スキーマが元々持っていた分離を、文章として明文化)。
+
+**この対策はprompt-onlyであり、Geminiが実際にこれに従う保証はない**
+(unit testで確認できるのはprompt文字列の内容のみ)。数値の論理的な
+包含関係(「15年以上」は「10年以上」を否定しない等)まで判定する
+backend側の検証、claim単位でcitationを紐付けるschema再設計、本番への
+常時LLM Judge導入は、効果に対する複雑性・コストの観点から見送った
+(Judgeは本番Gemini呼び出しを1→2回に倍増させるため、「通常のResearch
+1回あたりのGemini call数を増やさない」という方針に反する)。
 
 ## Structured Output
 
@@ -319,8 +502,8 @@ LLMの自由文をそのまま保存せず、Pydanticスキーマ(`app/services/
       "item_a_score": 5,
       "item_b_score": 4,
       "winner": "item_a",
-      "item_a_source_ids": [1, 3],
-      "item_b_source_ids": [2]
+      "item_a_citations": [{"source_id": 1, "chunk_index": 0}, {"source_id": 3, "chunk_index": 2}],
+      "item_b_citations": [{"source_id": 2, "chunk_index": 1}]
     }
   ]
 }
@@ -334,23 +517,38 @@ Frontend側で`research.item_a`/`item_b`に読み替えます。
 `score`(1〜5)は採用しています。実装コストがほぼゼロな一方、比較表での視覚的な
 優劣表示や将来のAI Evaluation(Comparison Completeness等)の材料になるためです。
 
-### Phase 3で追加した `item_a_source_ids` / `item_b_source_ids`
+### `item_a_citations` / `item_b_citations`(Phase 3で導入、Phase 5Dでchunk単位に拡張)
 
 **根拠本文(evidence_text)そのものはLLMに生成させません。** LLMが担うのは
-「提供した情報源のうち、どれを根拠にしたか(ID)」の選択だけです。実際に
-Evidence Viewerで表示する本文は、Tavily APIが実際に取得したページの内容
-(`sources.content`)をbackend側でそのまま複製したものです。
+「提供した情報源のうち、どのchunk(一節)を根拠にしたか」を`{source_id,
+chunk_index}`という座標で選ぶことだけです。
 
 理由: LLMに「引用文」まで自由生成させると、実際には存在しない文章を
 もっともらしく作り出してしまうリスク(ハルシネーション)があります。
-「どのIDを参照したか」という選択だけに役割を絞ることで、Evidence Viewerに
+「どの座標を参照したか」という選択だけに役割を絞ることで、Evidence Viewerに
 表示される文章は必ず実在するWebページの内容になることを保証しています。
 
-`source_id`はLLMの応答を受け取った後、**backend側で必ず実在するsourceか
-検証**しています(`research_runner.py`)。存在しないIDが返ってきた場合は
-Evidenceを作らず無視します(LLMが指定していないsourceを勝手に関連付けることも
-しません)。根拠が見つからない比較軸は`evidence`が0件になりますが、これは
-エラーではなく正常な状態として扱います(無理に根拠をでっち上げさせないため)。
+Phase 3時点は「どのsourceを根拠にしたか」(source単位)の選択のみでしたが、
+これだと`evidence_text`にsourceの全文(最大3000文字)をそのまま複製する
+ことになり、claimと無関係な部分(navigationテキスト等)まで含まれてしまう
+問題がありました。Phase 5Dから、`app/services/search_client.py::
+get_source_chunks()`で各sourceの本文を文単位のchunkに事前分割し、LLMには
+`chunk_index`まで選ばせることで、`evidence_text`を「claimを実際に支える
+一節」まで絞り込んでいます。`get_source_chunks()`自体はnoise filtering
+(`filter_noise()`: navigation断片・data URI/SVGの破損データ等、明らかな
+ノイズ行の削除。要約や言い換えは一切しない)とchunking(`chunk_content()`:
+文・改行などの自然なboundaryでの分割。soft targetであり、文の途中を
+機械的に切ることはしない)の2つの独立したpure functionで構成されています。
+
+`{source_id, chunk_index}`はLLMの応答を受け取った後、**backend側で必ず
+実在するsource・範囲内のchunkか検証**しています(`research_runner.py`)。
+存在しないsource_id・範囲外のchunk_indexが返ってきた場合はEvidenceを
+作らず無視します(LLMが指定していないsourceを勝手に関連付けることも
+しません)。実際に`evidence_text`へ保存する文字列は、LLMが返した文字列
+ではなく、backend側で`Source.content`から再計算したchunkの実テキストです
+(verbatimであることを保証するため)。根拠が見つからない比較軸は
+`evidence`が0件になりますが、これはエラーではなく正常な状態として
+扱います(無理に根拠をでっち上げさせないため)。
 
 ## 設計上の判断メモ
 
@@ -417,13 +615,30 @@ Research処理(LLM呼び出し・比較生成)はFastAPIの`BackgroundTasks`で�
   返さず、HTTPステータスに応じた定型メッセージのみを返します
   (`research_runner.py`のエラーハンドリング参照)。
 
-## 既知の制限 (Phase 3時点)
+## 既知の制限
 
 - LLMの回答が情報源の内容を完全に正確に要約している保証はない
-  (Evidence Viewerで元の情報源を必ず確認する設計にしている)。
-- 情報源の取得は「{技術名} 公式ドキュメント」というクエリでの検索に頼っており、
-  特定ドメインをホワイトリスト指定するような厳密な「公式サイト限定」はしていない
-  (任意の技術名に汎用的に対応するため)。
+  (Evidence Viewerで元の情報源を必ず確認する設計にしている)。実際に、
+  AI summaryの具体的な数値がEvidenceの内容と食い違う事例を確認している
+  (Phase 5D-e参照。prompt-onlyの対策を入れたが、効果は保証されない)。
+- 情報源の取得は、技術ごとの公式ドメインを事前登録するような厳密な
+  「公式サイト限定」はしていない(任意の技術名に汎用的に対応するため、
+  Phase 5D-c参照)。技術名とホスト名の一致や、汎用的なdocs-hostingパターン
+  への弱いranking boostで公式/一次情報を優先するに留まる。
+- Tavilyが、技術によっては70〜100文字程度の非常に短いcontent/snippetしか
+  返さない場合があり、該当sourceから取得できるEvidenceの文脈が乏しくなる
+  ことがある(Phase 5D full pipeline smoke testで確認。上流のretrieval
+  特性であり、backend側のchunk化ロジックの不具合ではない)。
+- `filter_noise()`の保守的な行削除ルールは、中程度の長さのボイラープレート
+  (画像キャプション等)を見逃す場合がある(同smoke testで確認)。
+- AI summaryが、Evidenceの限定的な表現(例: 他技術との相対比較としての
+  「やや」「若干」)を、その限定を落として断定的に言い換えてしまう
+  semantic-strength driftが残る場合がある(同smoke testで確認。Phase
+  5D-eのprompt対策は数値の補完を対象にしており、この種の表現の強さの
+  ドリフトまでは対象にしていない)。
+- Phase 5E(固定15ケースの再評価)でResearch Completion Rateが15/15→
+  10/15に低下した。retry/backoff/pacingのコード自体は変更していないが、
+  429/503がPhase 5Dのコード変更由来か外部要因かは未確定(Phase 5E/5F参照)。
 - AI Evaluation、History画面、Authentication、Cloud deploymentは未実装。
 - `BackgroundTasks`はdurableなジョブキューではない(上記参照)。
 
@@ -563,13 +778,102 @@ Run #1はJudgeが0/5成功(3件API失敗・2件Stage A未完了でnot-eligible)�
 生のJSON/CSV結果ファイルはGitにコミットしていない
 (`backend/evaluation/results/`は`.gitignore`対象)。
 
+### Evaluation結果: Phase 5E(Phase 5D適用後の再評価)
+
+Phase 5D(5D-a〜5D-e)適用後、Run #2と比較可能な条件(同じ固定15ケース、
+同じ`JUDGE_SAMPLE_CASE_IDS`、同じmetrics定義。`evaluation/dataset.py`・
+`evaluation/metrics.py`・`evaluation/judge.py`はいずれもPhase 4.1時点から
+無変更)で、Full Evaluationを1回実行した。
+
+| Reliability | Run #2 | Phase 5E |
+|---|---|---|
+| Research Completion Rate | 100%(15/15) | **66.7%(10/15)** |
+| 失敗種別 | なし | `llm_api_error_503`×2, `llm_api_error_429`×3 |
+| Latency mean / p50 / max | 3.74s / 3.63s / 5.26s | 7.83s / 7.49s / 10.88s |
+| Gemini comparison-generation 成功レスポンス数 | 15 | 10 |
+| Gemini Judge requested/succeeded/failed/not-eligible | 5 / 4 / 1 / 0 | 5 / **1** / 2 / 2 |
+| Tavily call数 | 30(2クエリ/research、旧設計) | 45(3クエリ/research、Phase 5D-aによる意図的な設計変更。品質の劣化ではない) |
+
+| Answer-quality(completedケースのみ) | Run #2 | Phase 5E |
+|---|---|---|
+| Comparison Completeness | 1.0 | 1.0 |
+| Evidence Coverage | 0.716 | **0.821(改善)** |
+| Source Utilization | 0.733 | **0.589(低下)** |
+| Recommendation Consistency | 0.786 | 0.9(母数10件と小さい) |
+
+LLM Judge(Evidence Correctness): Run #2は母数17件(4ケース成功)で
+supported 15 / partially_supported 2 / unsupported 0(supported rate
+0.882)。Phase 5Eは**Judgeが1/5ケースしか成功せず**(429で2ケース失敗、
+2ケースはStage A自体が失敗しJudge対象外)、母数はわずか6件(supported
+4 / partially_supported 2 / unsupported 0、supported rate 0.667)。
+**母数が17件→6件、かつ判定できたケース自体が異なる(c03のみ)ため、
+Phase 5D-eのclaim grounding対策の効果はこの実行結果からは比較不能。**
+
+**事実の整理(都合よく「改善成功」とまとめない)**:
+- Evidence Coverageは改善した(0.716→0.821)。
+- Source Utilizationは低下した(0.733→0.589)。
+- Reliabilityは429/503の多発により15/15→10/15へ低下した。
+- Claim groundingの効果は、Judge成功数が17件→6件に減ったため比較不能。
+- この結果を受け、Reliability低下の原因を事後に検証できるよう、
+  Phase 5Fとして最小限のログ出力(Observability)を追加した。
+
+**Reliability低下の原因調査**: retry/backoff/pacingのコード自体はRun #2
+から無変更であることを確認した。429/503は既存コード上retryableに分類
+されるため、失敗ケースは3回(初回+retry2回)を使い切った末に失敗したと
+論理的に推測できるが、**ログが存在しないため直接確認はできなかった**。
+DBのtimestamp(`Source.retrieved_at`)を使ったTavily/Gemini phase分離も
+試みたが、PostgreSQLの`now()`がトランザクション開始時刻を返す仕様のため
+信頼できる値にならず、分離は断念した。completedケースの平均latency
+(8.19s)がRun #2比で約2.2倍に増加している一方、retryしていない
+completedケースも同様に遅いことから、**latency増加の主因はretryそのもの
+ではなく、Phase 5D-a/bで検索クエリ・候補プールが増えたことによる可能性が
+高いと推測されるが未確定**。429/503自体がPhase 5Dのコード変更由来か、
+外部(Gemini側の負荷・本セッションの累積API利用)要因かは、今回のログでは
+切り分けられなかった。429/503の頻度が外部要因かコード要因かを実際に
+切り分けるための再評価は、今回は実施していない。
+
+### Phase 5F: Observability(retry/pacingの事後確認を可能にする最小ログ)
+
+Phase 5Eの原因調査で、retry試行回数・backoff秒数・Retry-Afterの使用
+有無・Gemini/Tavily phaseの所要時間のいずれも、事後にログから確認する
+手段が無いことが判明した。retry/backoff/pacingの**挙動自体は一切
+変更せず**、Python標準`logging`のみで以下を追加した(新規の監視
+サービス・structured loggingライブラリ・DBテーブルは導入していない):
+
+- `app/services/llm_client.py::_generate_structured()`
+  (comparison生成・Suggest Points共通): attempt番号・request種別
+  (comparison/suggestion)・pacing待機秒数・request自体の所要時間・
+  成功/失敗・HTTP status・Retry-Afterを使用したか・実際に適用した
+  backoff秒数をログ出力する。
+- `evaluation/judge.py::run_judge_for_case()`: 同様の形式でJudge呼び出し
+  (retryなし)をログ出力する(評価専用コードのため、本番には出ない)。
+- `app/services/research_runner.py::run_research()`: `time.monotonic()`
+  (DBのtimestampには依存しない)でretrieval phase・comparison_generation
+  phase・Research全体の所要時間を計測・ログ出力する。
+
+ログには`research_id`・`case_id`・attempt番号・秒数・HTTP statusなどの
+数値・識別子のみを出力し、prompt全文・Source本文・Evidence本文・goal/
+criteriaの自由文は一切出力しない(回帰テストで保証)。backoff秒数・
+Retry-Afterの使用有無は、既存のretry処理が1回だけ計算した値をそのまま
+ログに使う(観測のために同じ計算を再度呼び出すと、jitterの乱数が
+再抽選され、実際の待機秒数とログの値が食い違うため)。
+
+`evaluation/run_eval.py`の本実行時(`python -m evaluation.run_eval`)
+のみ`logging.basicConfig(level=logging.INFO)`でコンソールにログを
+出す設定を追加している(pytest実行時・APIサーバー実行時の挙動には
+影響しない)。
+
 ### Evaluationの限界
 
 - Evaluation Setは固定15ケースであり、統計的に十分な標本数とは言えない。
 - LLM Judgeの対象は15件中5件のみ(呼び出し回数を抑えるための設計上の
-  トレードオフ)。
+  トレードオフ)。Phase 5Eでは429により1/5しか成功せず、この少数性が
+  さらに際立った。
 - LLM Judge自体がLLM-as-a-Judge方式であり、判定そのものにLLMの
   バイアス・誤りが含まれうる(人手によるgold-standard評価ではない)。
+- Phase 5Eで観測された429/503の増加要因(コード変更 vs 外部要因)は、
+  Phase 5Fでログを追加した時点では未検証(次回Full Evaluation実行時に
+  ログを確認する)。
 
 ### 実行方法
 
@@ -580,15 +884,22 @@ python -m evaluation.run_eval  # 実API(Tavily/Gemini)を使った本実行
 ```
 
 本実行は、Evaluation Set全件分のTavily/Gemini API呼び出しを実際に行う
-(既定: Tavily 30回、Gemini 最大20回=比較生成15+Judge5)。結果は
+(既定: Tavily 45回=3クエリ/research×15、Gemini 最大20回=比較生成15+
+Judge5。Tavily呼び出し回数はPhase 5D-aで2→3クエリ/researchに変更した
+ため、Phase 4.1時点の30回から増えている)。結果は
 `backend/evaluation/results/run_<timestamp>.json` と、
 `..._cases.csv` / `..._judge_claims.csv` に保存される
 (生成物なので`.gitignore`でコミット対象外にしている)。
 
-2026年9月時点で、Baseline(Run #1)とrate-limit resilience改善後
-(Run #2)の2回、実APIを使った本実行を完了している(上記結果参照)。
+2026年9月時点で、Baseline(Run #1)・rate-limit resilience改善後
+(Run #2)・Phase 5D適用後の再評価(Phase 5E)の3回、実APIを使った
+本実行を完了している(上記結果参照)。
 
 ### 今後(Phase 4スコープ外)
 
+- Phase 5F追加後のログを使って、429/503がコード変更由来か外部要因かを
+  実際に切り分けるための再評価(ユーザーの承認を得てから実施する)。
+- Phase 5D-eで見送った、claim単位でcitationを紐付けるschema再設計、
+  本番への常時LLM Judge導入(コスト増を許容する判断が必要)。
 - History画面: 過去のResearch一覧を表示する。
 - Cloud deployment: 現状はローカル実行のみのため、デプロイ手順を整備する。

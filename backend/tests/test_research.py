@@ -4,11 +4,18 @@ Web検索(app.services.research_runner.search_technology)とLLM呼び出し
 (app.services.research_runner.generate_comparison)は実際のAPIを呼ばず、
 monkeypatchでmockに差し替える。実API(Tavily/Gemini)を使ったE2E確認は
 手動で行う(READMEの手順を参照)。
+
+Phase 5Dから、1 researchあたり`search_technology`は3回呼ばれる
+(item_a向け・item_b向け・比較記事向け、build_search_queries()参照)。
+`_canned_sources_for()`はクエリ文字列の中身を見て、どの呼び出しかを
+判別しダミーのsourceを1件返す。
 """
+
+import logging
 
 from google.genai import errors as genai_errors
 
-from app.services.llm_schemas import ComparisonReportResult
+from app.services.llm_schemas import ComparisonReportResult, EvidenceCitation
 from app.services.search_client import SearchResultItem
 from conftest import make_genai_api_error
 
@@ -20,12 +27,22 @@ VALID_PAYLOAD = {
 }
 
 
-def _canned_sources_for(item_name: str) -> list[SearchResultItem]:
+def _canned_sources_for(query: str, **_kwargs) -> list[SearchResultItem]:
+    if "vs" in query:
+        label = "FastAPI vs Django Comparison"
+        slug = "fastapi-vs-django"
+    elif "FastAPI" in query:
+        label = "FastAPI Official Docs"
+        slug = "fastapi"
+    else:
+        label = "Django Official Docs"
+        slug = "django"
+
     return [
         SearchResultItem(
-            title=f"{item_name} Official Docs",
-            url=f"https://example.com/{item_name.lower()}",
-            content=f"{item_name}に関する公式ドキュメントの内容(テスト用ダミー本文)。",
+            title=label,
+            url=f"https://example.com/{slug}",
+            content=f"{label}に関する公式ドキュメントの内容(テスト用ダミー本文)。",
         )
     ]
 
@@ -33,15 +50,20 @@ def _canned_sources_for(item_name: str) -> list[SearchResultItem]:
 def _mock_search(monkeypatch):
     monkeypatch.setattr(
         "app.services.research_runner.search_technology",
-        lambda item_name: _canned_sources_for(item_name),
+        lambda query, **kwargs: _canned_sources_for(query, **kwargs),
     )
 
 
 def _canned_result(sources: dict[int, SearchResultItem]) -> ComparisonReportResult:
-    """成功時のLLM応答を模したデータ。実際に保存されたsource idを引用する。"""
+    """成功時のLLM応答を模したデータ。実際に保存されたsource idを引用する。
+
+    各ダミーsourceの本文は1文(chunk_content()で1 chunkになる)なので、
+    chunk_index=0を指定すればよい。
+    """
     source_ids = list(sources.keys())
-    cite_a = source_ids[:1]
-    cite_b = source_ids[1:2] or source_ids[:1]
+    cite_a = [{"source_id": source_ids[0], "chunk_index": 0}] if source_ids else []
+    cite_b_id = source_ids[1] if len(source_ids) > 1 else (source_ids[0] if source_ids else None)
+    cite_b = [{"source_id": cite_b_id, "chunk_index": 0}] if cite_b_id is not None else []
 
     return ComparisonReportResult.model_validate(
         {
@@ -59,8 +81,8 @@ def _canned_result(sources: dict[int, SearchResultItem]) -> ComparisonReportResu
                     "item_a_score": 5,
                     "item_b_score": 4,
                     "winner": "item_a",
-                    "item_a_source_ids": cite_a,
-                    "item_b_source_ids": cite_b,
+                    "item_a_citations": cite_a,
+                    "item_b_citations": cite_b,
                 },
                 {
                     "criterion": "ai_compatibility",
@@ -71,8 +93,8 @@ def _canned_result(sources: dict[int, SearchResultItem]) -> ComparisonReportResu
                     "item_b_score": 3,
                     "winner": "item_a",
                     # あえて根拠を挙げないケース(0件許容)を混ぜる。
-                    "item_a_source_ids": [],
-                    "item_b_source_ids": [],
+                    "item_a_citations": [],
+                    "item_b_citations": [],
                 },
             ],
         }
@@ -261,6 +283,68 @@ def test_research_completes_after_background_processing(client, monkeypatch):
     assert response.json()["status"] == "completed"
 
 
+def test_research_completes_and_logs_all_three_phases(client, monkeypatch, caplog):
+    """Phase 5F: Observability。completedケースでは、retrieval→
+    comparison_generation→research_doneの3行がこの順で出ること、
+    research_idやduration_s等の数値のみを含み、goal/criteria等の自由文は
+    含まないことを確認する。"""
+    _mock_success(monkeypatch)
+
+    with caplog.at_level(logging.INFO, logger="app.services.research_runner"):
+        create_response = client.post("/research", json=VALID_PAYLOAD)
+    research_id = create_response.json()["id"]
+
+    messages = [r.message for r in caplog.records]
+    retrieval_logs = [m for m in messages if "phase=retrieval" in m]
+    comparison_logs = [m for m in messages if "phase=comparison_generation" in m]
+    done_logs = [m for m in messages if m.startswith("research_done")]
+
+    assert len(retrieval_logs) == 1
+    assert "outcome=success" in retrieval_logs[0]
+    assert f"research_id={research_id}" in retrieval_logs[0]
+
+    assert len(comparison_logs) == 1
+    assert "outcome=success" in comparison_logs[0]
+
+    assert len(done_logs) == 1
+    assert "status=completed" in done_logs[0]
+    assert f"research_id={research_id}" in done_logs[0]
+
+    # research_phaseの前にretrieval、その後にcomparison_generationが来ること。
+    assert messages.index(retrieval_logs[0]) < messages.index(comparison_logs[0])
+    assert messages.index(comparison_logs[0]) < messages.index(done_logs[0])
+
+    # goal(VALID_PAYLOADの自由文)等の大量/機密テキストがログに含まれないこと。
+    for message in messages:
+        assert VALID_PAYLOAD["goal"] not in message
+        assert len(message) < 300
+
+
+def test_research_logs_only_retrieval_phase_when_search_fails(client, monkeypatch, caplog):
+    """Phase 5F: Observability。retrieval phaseで失敗した場合、
+    comparison_generation phaseのログは一切出ないこと(到達していないため)。"""
+    import tavily.errors as tavily_errors
+
+    def _missing_key(query, **_kwargs):
+        raise tavily_errors.MissingAPIKeyError()
+
+    monkeypatch.setattr("app.services.research_runner.search_technology", _missing_key)
+
+    with caplog.at_level(logging.INFO, logger="app.services.research_runner"):
+        client.post("/research", json=VALID_PAYLOAD)
+
+    messages = [r.message for r in caplog.records]
+    retrieval_logs = [m for m in messages if "phase=retrieval" in m]
+    comparison_logs = [m for m in messages if "phase=comparison_generation" in m]
+    done_logs = [m for m in messages if m.startswith("research_done")]
+
+    assert len(retrieval_logs) == 1
+    assert "outcome=failure" in retrieval_logs[0]
+    assert comparison_logs == []
+    assert len(done_logs) == 1
+    assert "status=failed" in done_logs[0]
+
+
 def test_research_result_after_completion(client, monkeypatch):
     _mock_success(monkeypatch)
 
@@ -336,7 +420,7 @@ def test_research_fails_when_search_raises_missing_api_key(client, monkeypatch):
     """Tavily検索が失敗した場合もstatus=failedになり、生のエラーを露出しない。"""
     import tavily.errors as tavily_errors
 
-    def _missing_key(item_name):
+    def _missing_key(query, **_kwargs):
         raise tavily_errors.MissingAPIKeyError()
 
     monkeypatch.setattr(
@@ -429,13 +513,14 @@ def test_free_text_criterion_label_equals_the_input_string(client, monkeypatch):
                         "item_a_score": 4,
                         "item_b_score": 3,
                         "winner": "item_a",
-                        "item_a_source_ids": [],
-                        "item_b_source_ids": [],
+                        "item_a_citations": [],
+                        "item_b_citations": [],
                     }
                     for key in custom_criteria
                 ],
             }
         )
+
 
     monkeypatch.setattr(
         "app.services.research_runner.generate_comparison", _echo_requested_criteria
@@ -467,11 +552,13 @@ def test_sources_are_saved_and_returned(client, monkeypatch):
     result_response = client.get(f"/research/{research_id}/result")
     body = result_response.json()
 
-    # item_a用・item_b用でそれぞれ1件ずつ、計2件のsourceが保存されているはず。
-    assert len(body["sources"]) == 2
+    # item_a向け・item_b向け・比較記事向けで1件ずつ、計3件のsourceが
+    # 保存されているはず(Phase 5D: 3クエリ)。
+    assert len(body["sources"]) == 3
     titles = {s["title"] for s in body["sources"]}
     assert "FastAPI Official Docs" in titles
     assert "Django Official Docs" in titles
+    assert "FastAPI vs Django Comparison" in titles
 
 
 def test_evidence_is_attached_to_cited_source_only(client, monkeypatch):
@@ -524,8 +611,9 @@ def test_evidence_with_nonexistent_source_id_is_ignored(client, monkeypatch):
     def _hallucinated_source_id(**kwargs):
         result = _canned_result(kwargs["sources"])
         # 実在しないsource_id(存在しないはずの大きな値)を挙げてしまうケース。
-        result.comparisons[0].item_a_source_ids = [999999]
-        result.comparisons[0].item_b_source_ids = [999999]
+        citation = EvidenceCitation(source_id=999999, chunk_index=0)
+        result.comparisons[0].item_a_citations = [citation]
+        result.comparisons[0].item_b_citations = [citation]
         return result
 
     monkeypatch.setattr(
@@ -543,6 +631,37 @@ def test_evidence_with_nonexistent_source_id_is_ignored(client, monkeypatch):
     comparisons = result_response.json()["comparisons"]
     dev_speed = next(c for c in comparisons if c["criterion"] == "development_speed")
     # 存在しないsource_idへのEvidenceは作られない。
+    assert dev_speed["evidence"] == []
+
+
+def test_evidence_with_out_of_range_chunk_index_is_ignored(client, monkeypatch):
+    """LLMが実在するsource_idでも範囲外のchunk_indexを挙げた場合、
+    Evidenceとして保存せず無視する(Phase 5D)。"""
+    _mock_search(monkeypatch)
+
+    def _out_of_range_chunk(**kwargs):
+        result = _canned_result(kwargs["sources"])
+        source_id = next(iter(kwargs["sources"]))
+        # ダミーsourceの本文は1文(chunkは1件、index 0)しかないため、
+        # index 5は必ず範囲外になる。
+        citation = EvidenceCitation(source_id=source_id, chunk_index=5)
+        result.comparisons[0].item_a_citations = [citation]
+        result.comparisons[0].item_b_citations = [citation]
+        return result
+
+    monkeypatch.setattr(
+        "app.services.research_runner.generate_comparison", _out_of_range_chunk
+    )
+
+    create_response = client.post("/research", json=VALID_PAYLOAD)
+    research_id = create_response.json()["id"]
+
+    status_response = client.get(f"/research/{research_id}")
+    assert status_response.json()["status"] == "completed"
+
+    result_response = client.get(f"/research/{research_id}/result")
+    comparisons = result_response.json()["comparisons"]
+    dev_speed = next(c for c in comparisons if c["criterion"] == "development_speed")
     assert dev_speed["evidence"] == []
 
 

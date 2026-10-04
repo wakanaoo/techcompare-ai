@@ -110,9 +110,9 @@ def count_search_calls(recorder: UsageRecorder) -> Iterator[None]:
     """
     real_search_technology = research_runner_module.search_technology
 
-    def _counting_search(item_name: str) -> list[SearchResultItem]:
+    def _counting_search(*args, **kwargs) -> list[SearchResultItem]:
         recorder.search_call_count += 1
-        return real_search_technology(item_name)
+        return real_search_technology(*args, **kwargs)
 
     research_runner_module.search_technology = _counting_search
     try:

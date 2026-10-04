@@ -15,16 +15,23 @@ genericな`Evidence.claim`(定型文)ではなく、実際の
 
 from __future__ import annotations
 
+import logging
+import time
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Literal
 
 from google import genai
+from google.genai import errors as genai_errors
 from google.genai import types
 from pydantic import BaseModel, Field
 
 from app.core.config import settings
 from app.services.llm_client import MODEL, pace_gemini_request
+
+# Phase 5F: Observability。promptの内容・Evidence本文等はログに出さない
+# (case_id・attempt・所要時間・成功/失敗・HTTP statusのみ)。
+logger = logging.getLogger(__name__)
 
 
 class ClaimVerdict(str, Enum):
@@ -130,21 +137,48 @@ def run_judge_for_case(case: JudgeCaseInput) -> CaseJudgmentResult:
     ロジックは持たせない)。ただし、Gemini APIへのペース管理(最小リクエスト
     間隔)はcomparison生成と共有する(pace_gemini_request()参照。同じ
     Gemini API利用として、429を避けるためのペースを揃える)。
+
+    Phase 5F: Observability。retryが無いためattemptは常に1/1。ログには
+    case_id・pacing待機秒数・request自体の所要時間・成功/失敗・
+    (失敗時)HTTP statusのみを出す(promptの内容・Evidence本文は出さない)。
     """
     # app.services.llm_client.generate_comparison()と同様、SDKの環境変数
     # 自動探索(バージョンによってGOOGLE_API_KEY/GEMINI_API_KEYのどちらを
     # 見るか変わりうる)に依存せず、Settings経由のキーを明示的に渡す。
     client = genai.Client(api_key=settings.gemini_api_key)
     prompt = _build_prompt(case)
-    pace_gemini_request()
-    response = client.models.generate_content(
-        model=MODEL,
-        contents=prompt,
-        config=types.GenerateContentConfig(
-            response_mime_type="application/json",
-            response_schema=CaseJudgmentResult,
-        ),
+    pacing_wait_seconds = pace_gemini_request()
+    attempt_start = time.monotonic()
+    try:
+        response = client.models.generate_content(
+            model=MODEL,
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json",
+                response_schema=CaseJudgmentResult,
+            ),
+        )
+    except (genai_errors.ServerError, genai_errors.ClientError) as exc:
+        duration_seconds = time.monotonic() - attempt_start
+        logger.warning(
+            "gemini_request request_type=judge case_id=%s attempt=1/1 "
+            "pacing_wait_s=%.2f duration_s=%.2f outcome=failure status=%s",
+            case.case_id,
+            pacing_wait_seconds,
+            duration_seconds,
+            getattr(exc, "code", "unknown"),
+        )
+        raise
+
+    duration_seconds = time.monotonic() - attempt_start
+    logger.info(
+        "gemini_request request_type=judge case_id=%s attempt=1/1 "
+        "pacing_wait_s=%.2f duration_s=%.2f outcome=success",
+        case.case_id,
+        pacing_wait_seconds,
+        duration_seconds,
     )
+
     result = response.parsed
     if not isinstance(result, CaseJudgmentResult):
         raise ValueError(

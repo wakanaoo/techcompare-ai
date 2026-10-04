@@ -3,7 +3,10 @@
 実際のGemini APIは呼ばず、genai.Clientをmockに差し替える。
 """
 
+import logging
+
 import pytest
+from google.genai import errors as genai_errors
 
 from evaluation.judge import (
     CaseJudgmentResult,
@@ -120,11 +123,12 @@ def test_run_judge_for_case_applies_shared_gemini_pacing(monkeypatch):
     monkeypatch.setattr(judge_module.genai, "Client", lambda **kwargs: _FakeClient(fake_models))
 
     pacing_calls = {"count": 0}
-    monkeypatch.setattr(
-        judge_module,
-        "pace_gemini_request",
-        lambda: pacing_calls.__setitem__("count", pacing_calls["count"] + 1),
-    )
+
+    def _fake_pace_gemini_request() -> float:
+        pacing_calls["count"] += 1
+        return 0.0  # pace_gemini_request()はPhase 5Fから待機秒数(float)を返す
+
+    monkeypatch.setattr(judge_module, "pace_gemini_request", _fake_pace_gemini_request)
 
     run_judge_for_case(_sample_case_input())
 
@@ -203,3 +207,86 @@ def test_aggregate_judge_claims_handles_empty_list():
     assert aggregate["claims_judged_total"] == 0
     assert aggregate["evidence_correctness"]["supported_rate"] is None
     assert aggregate["unsupported_claim"]["unsupported_rate"] is None
+
+
+# --- Phase 5F: Observability (logging) --------------------------------------
+
+
+def test_run_judge_for_case_logs_success(monkeypatch, caplog):
+    expected = CaseJudgmentResult(claims=[])
+    fake_models = _FakeModels(_FakeResponse(expected))
+
+    import evaluation.judge as judge_module
+
+    monkeypatch.setattr(judge_module.genai, "Client", lambda **kwargs: _FakeClient(fake_models))
+
+    with caplog.at_level(logging.INFO, logger="evaluation.judge"):
+        run_judge_for_case(_sample_case_input())
+
+    logs = [r.message for r in caplog.records if r.message.startswith("gemini_request")]
+    assert len(logs) == 1
+    assert "request_type=judge" in logs[0]
+    assert "case_id=c01" in logs[0]
+    assert "attempt=1/1" in logs[0]
+    assert "outcome=success" in logs[0]
+
+
+def test_run_judge_for_case_logs_failure_and_still_raises(monkeypatch, caplog):
+    import evaluation.judge as judge_module
+    from conftest import make_genai_api_error
+
+    fake_503 = make_genai_api_error(
+        genai_errors.ServerError, 503, "overloaded", "UNAVAILABLE"
+    )
+
+    class _RaisingModels:
+        def generate_content(self, **kwargs):
+            raise fake_503
+
+    monkeypatch.setattr(
+        judge_module.genai, "Client", lambda **kwargs: _FakeClient(_RaisingModels())
+    )
+
+    with caplog.at_level(logging.INFO, logger="evaluation.judge"):
+        with pytest.raises(genai_errors.ServerError):
+            run_judge_for_case(_sample_case_input())
+
+    logs = [r.message for r in caplog.records if r.message.startswith("gemini_request")]
+    assert len(logs) == 1
+    assert "request_type=judge" in logs[0]
+    assert "outcome=failure" in logs[0]
+    assert "status=503" in logs[0]
+
+
+def test_run_judge_for_case_logs_never_contain_prompt_or_evidence_text(monkeypatch, caplog):
+    """ログにprompt全文・Evidence本文等の大量/機密テキストが含まれないことの
+    回帰テスト(Phase 5F設計で明示的に禁止した事項)。"""
+    secret_marker = "SECRET_EVIDENCE_TEXT_SHOULD_NOT_APPEAR_IN_LOGS"
+    case = JudgeCaseInput(
+        case_id="c01",
+        item_a="FastAPI",
+        item_b="Django",
+        goal="AIアプリのバックエンドとして採用したい",
+        claims=[
+            JudgeClaimInput(
+                criterion="development_speed",
+                criterion_label="開発速度",
+                side="item_a",
+                summary="FastAPIは型ヒントを活かして高速に開発できる。",
+                has_evidence=True,
+                evidence_texts=[secret_marker],
+            ),
+        ],
+    )
+    fake_models = _FakeModels(_FakeResponse(CaseJudgmentResult(claims=[])))
+
+    import evaluation.judge as judge_module
+
+    monkeypatch.setattr(judge_module.genai, "Client", lambda **kwargs: _FakeClient(fake_models))
+
+    with caplog.at_level(logging.INFO, logger="evaluation.judge"):
+        run_judge_for_case(case)
+
+    for record in caplog.records:
+        assert secret_marker not in record.message
+        assert len(record.message) < 300

@@ -65,6 +65,44 @@ def label_for(criterion: str) -> str:
         return criterion
 
 
+# Phase 5D-c: Query Language Strategy。固定criteriaについてのみ、Tavily検索
+# クエリ(item_a/item_b向け、英語中心のofficial/primary retrieval用)に使う
+# 英語search termを用意する。CRITERION_LABELS(日本語)と対になる表だが、
+# 用途は異なる(表示用ではなく検索クエリ用)。
+#
+# 各criterionにつき1語/1フレーズの、意味的に忠実な直訳のみとする
+# ("tutorial" "plugins"のような関連語への拡張はしない)。これはquery
+# languageそのものの効果(日本語→英語)と、criteria keywordの拡張効果を
+# 混同しないため(Phase 5D-c設計時の明示的な方針)。
+CRITERION_ENGLISH_SEARCH_TERMS: dict[Criterion, str] = {
+    Criterion.learning_curve: "learning curve",
+    Criterion.development_speed: "development speed",
+    Criterion.ai_compatibility: "AI compatibility",
+    Criterion.performance: "performance",
+    Criterion.async_support: "async support",
+    Criterion.type_safety: "type safety",
+    Criterion.deployability: "deployability",
+    Criterion.ecosystem: "ecosystem",
+    Criterion.operability: "operability",
+    Criterion.cost: "cost",
+}
+
+
+def english_search_term_for(criterion: str) -> str | None:
+    """criterionの英語search termを返す(Phase 5D-c、検索クエリ専用)。
+
+    固定候補(Criterion)であればCRITERION_ENGLISH_SEARCH_TERMSの値を返す。
+    それ以外(ユーザーの自由入力、多くは日本語を含みうる)は、正確な英訳を
+    機械的に保証できないため`None`を返す(呼び出し側はNoneを「英語クエリ
+    には含めない」の意味で扱う。label_for()のように入力文字列をそのまま
+    返すフォールバックはしない点がlabel_for()と異なる)。
+    """
+    try:
+        return CRITERION_ENGLISH_SEARCH_TERMS[Criterion(criterion)]
+    except ValueError:
+        return None
+
+
 def canonical_key_for(criterion: str) -> str:
     """重複判定用の正規化キーを返す。
 

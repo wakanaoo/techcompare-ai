@@ -319,7 +319,16 @@ if __name__ == "__main__":
     # 実APIを使った本実行のエントリーポイント。
     # ユーザーの承認前にこのスクリプトを直接実行しないこと
     # (README Phase4セクション「実行方法」を参照)。
+    import logging
+
     from evaluation.report import write_report
+
+    # Phase 5F: Observability。この本実行スクリプトでのみログをコンソールに
+    # 出す(pytest実行時・APIサーバー実行時には影響しない、スクリプト単体の
+    # ローカル設定)。app.services.llm_client/research_runner、
+    # evaluation.judgeが出すログ(gemini_request/research_phase/
+    # research_done)がここで見えるようになる。
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
 
     result = run_evaluation()
     aggregate = build_aggregate(result)

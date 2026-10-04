@@ -8,14 +8,16 @@
 """
 
 import json
+import logging
 
 import pytest
 import requests
 from google.genai import errors as genai_errors
 
 import app.services.llm_client as llm_client_module
-from app.services.llm_client import generate_comparison
+from app.services.llm_client import _build_prompt, generate_comparison
 from app.services.llm_schemas import ComparisonReportResult
+from app.services.search_client import SearchResultItem
 from conftest import make_genai_api_error
 
 
@@ -189,6 +191,115 @@ def test_generate_comparison_passes_gemini_api_key_from_settings_explicitly(monk
     assert captured_kwargs == {"api_key": "dummy-test-api-key"}
 
 
+# --- Phase 5F: Observability (logging) --------------------------------------
+
+
+def _gemini_request_log_messages(caplog) -> list[str]:
+    return [r.message for r in caplog.records if r.message.startswith("gemini_request")]
+
+
+def test_generate_structured_logs_single_successful_attempt(monkeypatch, caplog):
+    fake_models = _FakeModels([_valid_response()])
+    _patch_client(monkeypatch, fake_models)
+
+    with caplog.at_level(logging.INFO, logger="app.services.llm_client"):
+        _call_generate_comparison()
+
+    logs = _gemini_request_log_messages(caplog)
+    assert len(logs) == 1
+    assert "request_type=comparison" in logs[0]
+    assert "attempt=1/3" in logs[0]
+    assert "outcome=success" in logs[0]
+
+
+def test_generate_structured_logs_failure_then_success_with_increasing_attempt_numbers(
+    monkeypatch, caplog
+):
+    fake_503 = make_genai_api_error(
+        genai_errors.ServerError, 503, "overloaded", "UNAVAILABLE"
+    )
+    fake_models = _FakeModels([fake_503, _valid_response()])
+    sleep_calls: list[float] = []
+    _patch_client(monkeypatch, fake_models, sleep_calls)
+
+    with caplog.at_level(logging.INFO, logger="app.services.llm_client"):
+        _call_generate_comparison()
+
+    logs = _gemini_request_log_messages(caplog)
+    assert len(logs) == 2
+    assert "attempt=1/3" in logs[0] and "outcome=failure" in logs[0]
+    assert "attempt=2/3" in logs[1] and "outcome=success" in logs[1]
+    # backoffは1回だけ計算され、ログと実際のtime.sleep()呼び出しが同じ値であること
+    # (再計算してjitterが再抽選されていないことの確認)。
+    assert f"backoff_s={sleep_calls[0]:.2f}" in logs[0]
+
+
+def test_generate_structured_logs_retry_after_usage_when_present(monkeypatch, caplog):
+    response = requests.Response()
+    response.status_code = 429
+    response._content = json.dumps(
+        {"error": {"message": "rate limited", "status": "RESOURCE_EXHAUSTED"}}
+    ).encode("utf-8")
+    response.headers["Retry-After"] = "7"
+    fake_429 = genai_errors.ClientError(429, response)
+    fake_models = _FakeModels([fake_429, _valid_response()])
+    sleep_calls: list[float] = []
+    _patch_client(monkeypatch, fake_models, sleep_calls)
+
+    with caplog.at_level(logging.INFO, logger="app.services.llm_client"):
+        _call_generate_comparison()
+
+    logs = _gemini_request_log_messages(caplog)
+    assert "retry_after_used=True" in logs[0]
+    assert "backoff_s=7.00" in logs[0]
+    assert sleep_calls == [7.0]
+
+
+def test_generate_structured_logs_all_attempts_when_every_attempt_fails(monkeypatch, caplog):
+    fake_503 = make_genai_api_error(
+        genai_errors.ServerError, 503, "overloaded", "UNAVAILABLE"
+    )
+    fake_models = _FakeModels([fake_503, fake_503, fake_503])
+    sleep_calls: list[float] = []
+    _patch_client(monkeypatch, fake_models, sleep_calls)
+
+    with caplog.at_level(logging.INFO, logger="app.services.llm_client"):
+        with pytest.raises(genai_errors.ServerError):
+            _call_generate_comparison()
+
+    logs = _gemini_request_log_messages(caplog)
+    assert len(logs) == 3
+    assert all("outcome=failure" in m for m in logs)
+    assert "attempt=1/3" in logs[0]
+    assert "attempt=2/3" in logs[1]
+    assert "attempt=3/3" in logs[2]
+    # 最後のattemptはretryしない(=backoffを計算しない)ため、該当フィールドが無い。
+    assert "backoff_s" not in logs[2]
+
+
+def test_generate_structured_logs_never_contain_prompt_or_source_text(monkeypatch, caplog):
+    """ログにprompt全文・Source本文等の大量/機密テキストが含まれないことの
+    回帰テスト(Phase 5F設計で明示的に禁止した事項)。"""
+    secret_marker = "SECRET_SOURCE_BODY_SHOULD_NOT_APPEAR_IN_LOGS"
+    fake_models = _FakeModels([_valid_response()])
+    _patch_client(monkeypatch, fake_models)
+
+    with caplog.at_level(logging.INFO, logger="app.services.llm_client"):
+        generate_comparison(
+            item_a="FastAPI",
+            item_b="Django",
+            goal="test",
+            criteria=["development_speed"],
+            sources={
+                1: SearchResultItem(title="t", url="https://example.com", content=secret_marker)
+            },
+        )
+
+    for record in caplog.records:
+        assert secret_marker not in record.message
+        assert len(record.message) < 300  # 大量テキストが紛れ込んでいないことの簡易確認
+
+
 # --- Phase 4.1: rate-limit resilience(backoff/jitter/Retry-After/pacing) ---
 
 
@@ -198,12 +309,14 @@ def test_backoff_increases_exponentially_across_attempts(monkeypatch):
         genai_errors.ServerError, 503, "overloaded", "UNAVAILABLE"
     )
 
-    first = llm_client_module._compute_backoff_seconds(0, fake_503)
-    second = llm_client_module._compute_backoff_seconds(1, fake_503)
+    first, first_used_retry_after = llm_client_module._compute_backoff_seconds(0, fake_503)
+    second, second_used_retry_after = llm_client_module._compute_backoff_seconds(1, fake_503)
 
     assert first == 1.0  # base(1.0) * 2**0
     assert second == 2.0  # base(1.0) * 2**1
     assert second > first
+    assert first_used_retry_after is False
+    assert second_used_retry_after is False
 
 
 def test_backoff_includes_jitter(monkeypatch):
@@ -212,9 +325,10 @@ def test_backoff_includes_jitter(monkeypatch):
         genai_errors.ServerError, 503, "overloaded", "UNAVAILABLE"
     )
 
-    seconds = llm_client_module._compute_backoff_seconds(0, fake_503)
+    seconds, used_retry_after = llm_client_module._compute_backoff_seconds(0, fake_503)
 
     assert seconds == pytest.approx(1.3)  # base(1.0) + jitter(0.3)
+    assert used_retry_after is False
 
 
 def test_backoff_prefers_retry_after_header_when_present(monkeypatch):
@@ -227,10 +341,11 @@ def test_backoff_prefers_retry_after_header_when_present(monkeypatch):
     response.headers["Retry-After"] = "7"
     fake_429 = genai_errors.ClientError(429, response)
 
-    seconds = llm_client_module._compute_backoff_seconds(0, fake_429)
+    seconds, used_retry_after = llm_client_module._compute_backoff_seconds(0, fake_429)
 
     # Retry-Afterが取得できる場合は、指数バックオフ+jitterより優先する。
     assert seconds == 7.0
+    assert used_retry_after is True
 
 
 def test_backoff_falls_back_to_exponential_when_no_retry_after_header(monkeypatch):
@@ -239,9 +354,10 @@ def test_backoff_falls_back_to_exponential_when_no_retry_after_header(monkeypatc
         genai_errors.ServerError, 503, "overloaded", "UNAVAILABLE"
     )
 
-    seconds = llm_client_module._compute_backoff_seconds(0, fake_503)
+    seconds, used_retry_after = llm_client_module._compute_backoff_seconds(0, fake_503)
 
     assert seconds == 1.0
+    assert used_retry_after is False
 
 
 class _FakeClock:
@@ -271,13 +387,15 @@ def test_pace_gemini_request_waits_for_configured_minimum_interval(monkeypatch):
         lambda seconds: (sleep_calls.append(seconds), clock.advance(seconds)),
     )
 
-    llm_client_module.pace_gemini_request()  # 初回は待機しない
+    first_wait = llm_client_module.pace_gemini_request()  # 初回は待機しない
     assert sleep_calls == []
+    assert first_wait == 0.0
 
     clock.advance(1.0)  # 1秒しか経っていない(5秒間隔に満たない)
-    llm_client_module.pace_gemini_request()
+    second_wait = llm_client_module.pace_gemini_request()
 
     assert sleep_calls == [pytest.approx(4.0)]  # 5.0 - 1.0
+    assert second_wait == pytest.approx(4.0)  # 実際に待機した秒数を返す(Phase 5F)
 
 
 def test_pace_gemini_request_skips_wait_when_interval_already_elapsed(monkeypatch):
@@ -296,9 +414,10 @@ def test_pace_gemini_request_skips_wait_when_interval_already_elapsed(monkeypatc
 
     llm_client_module.pace_gemini_request()
     clock.advance(10.0)  # 間隔(5秒)より十分経過している
-    llm_client_module.pace_gemini_request()
+    wait = llm_client_module.pace_gemini_request()
 
     assert sleep_calls == []
+    assert wait == 0.0  # 待機不要の場合は0.0を返す(Phase 5F)
 
 
 def test_pace_gemini_request_is_noop_when_min_interval_is_zero(monkeypatch):
@@ -315,3 +434,46 @@ def test_pace_gemini_request_is_noop_when_min_interval_is_zero(monkeypatch):
     llm_client_module.pace_gemini_request()
 
     assert sleep_calls == []
+
+
+# --- _build_prompt: Phase 5D-e (Claim Grounding, prompt-only) --------------
+
+
+def _sample_sources() -> dict[int, SearchResultItem]:
+    return {
+        1: SearchResultItem(
+            title="Flask Docs", url="https://flask.palletsprojects.com", content="Flask is a framework."
+        ),
+    }
+
+
+def test_build_prompt_requires_summary_to_be_supportable_by_cited_chunks():
+    prompt = _build_prompt("Flask", "FastAPI", "個人開発用", ["learning_curve"], _sample_sources())
+
+    assert "情報源(chunk)によって実際に" in prompt
+    assert "支持できる内容だけを書くこと" in prompt
+    assert "事前学習知識で" in prompt
+    assert "補って書かない" in prompt
+
+
+def test_build_prompt_instructs_qualitative_wording_when_sources_disagree_on_numbers():
+    prompt = _build_prompt("Flask", "FastAPI", "個人開発用", ["ecosystem"], _sample_sources())
+
+    assert "数値が食い違う場合" in prompt
+    assert "定性的な表現" in prompt
+
+
+def test_build_prompt_no_longer_permits_general_knowledge_filler():
+    """旧い許可文言(一般的な知識を参考程度に述べてもよい)は、情報源に
+    記載が無いケースのfallbackとしてもはや許可されていない(退行防止)。"""
+    prompt = _build_prompt("Flask", "FastAPI", "個人開発用", ["learning_curve"], _sample_sources())
+
+    assert "一般的な知識を参考程度に述べてもよい" not in prompt
+    assert "一般的な知識で具体的な数値・固有の事実を補わない" in prompt
+
+
+def test_build_prompt_separates_recommendation_as_ai_interpretation_layer():
+    prompt = _build_prompt("Flask", "FastAPI", "個人開発用", ["learning_curve"], _sample_sources())
+
+    assert "AIが解釈・総合判断する層" in prompt
+    assert "個々のcitationを挙げる必要はない" in prompt

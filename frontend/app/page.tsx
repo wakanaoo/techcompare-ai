@@ -14,15 +14,7 @@ import { useCriteriaSelection } from "@/hooks/useCriteriaSelection";
 import { createResearch } from "@/lib/api";
 import { findTechnologyIdByName, getUseCaseExamples } from "@/lib/catalog";
 import { CRITERION_OPTIONS, DEFAULT_CRITERIA, MAX_CRITERIA, MIN_CRITERIA } from "@/lib/criteria";
-import { CATEGORIES } from "@/data/categories";
 import { TECHNOLOGY_PAIR_EXAMPLES } from "@/data/technologyPairExamples";
-
-// Exploreのhover previewに出す代表カテゴリ。実際に技術データを持つ
-// (`available: true`)カテゴリだけを見せる(Coming soonのカテゴリは
-// Exploreしても中身が無いため、期待外れな誘導を避ける)。
-const EXPLORE_PREVIEW_CATEGORIES = CATEGORIES.filter((c) => c.available)
-  .map((c) => c.name)
-  .join(" · ");
 
 /**
  * Home(Phase 5C Finishing 追補v4)。
@@ -145,7 +137,7 @@ export default function NewResearchPage() {
           <span className="home-entry__title">Learn</span>
           <span className="home-entry__hint">I&apos;m not sure what to compare</span>
           <span className="home-entry__preview" aria-hidden="true">
-            {EXPLORE_PREVIEW_CATEGORIES}
+            Explore technologies →
           </span>
         </Link>
 
@@ -159,7 +151,7 @@ export default function NewResearchPage() {
           <span className="home-entry__title">Compare</span>
           <span className="home-entry__hint">I know what to compare</span>
           <span className="home-entry__preview" aria-hidden="true">
-            Technology A · Technology B · Start comparing →
+            Start comparing →
           </span>
         </button>
       </div>

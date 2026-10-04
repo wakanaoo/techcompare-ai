@@ -57,8 +57,8 @@ class _FakeModels:
                                 "item_b_score": 3,
                                 "winner": "item_a",
                                 # 引用元は無し(has_evidence=falseの経路も検証するため)。
-                                "item_a_source_ids": [],
-                                "item_b_source_ids": [],
+                                "item_a_citations": [],
+                                "item_b_citations": [],
                             }
                         ],
                     }
@@ -93,13 +93,16 @@ class _FakeClient:
         self.models = models
 
 
-def _fake_search(item_name: str) -> list[SearchResultItem]:
-    if item_name == "Gamma":
-        # 2ケース目(case_fail)は検索段階で失敗させる。
+def _fake_search(query: str, **_kwargs) -> list[SearchResultItem]:
+    if "Gamma" in query:
+        # 2ケース目(case_fail)は、3クエリのうち最初(item_a向け、Gammaを含む)
+        # で検索段階から失敗させる。
         raise tavily_errors.MissingAPIKeyError()
     return [
         SearchResultItem(
-            title=f"{item_name} doc", url=f"https://example.com/{item_name}", content=f"{item_name} content"
+            title=f"doc for: {query}",
+            url=f"https://example.com/{abs(hash(query))}",
+            content=f"{query} content",
         )
     ]
 
@@ -147,8 +150,9 @@ def test_run_evaluation_end_to_end(client, monkeypatch):
     assert result.gemini_judge_usage["call_count"] == 1
     assert fake_models.call_count == 2
 
-    # Tavily呼び出し回数: t1は2回(item_a, item_b)。t2はitem_a(Gamma)で即失敗するため1回のみ。
-    assert result.tavily_call_count == 3
+    # Tavily呼び出し回数: t1は3回(item_a向け・item_b向け・比較記事向け、Phase 5D)。
+    # t2は最初のクエリ(item_a=Gammaを含む)で即失敗するため1回のみ。
+    assert result.tavily_call_count == 4
 
     aggregate = build_aggregate(result)
     assert aggregate["reliability"]["cases_total"] == 2
@@ -181,8 +185,8 @@ def _valid_comparison_fake_response() -> _FakeResponse:
                         "item_a_score": 4,
                         "item_b_score": 3,
                         "winner": "item_a",
-                        "item_a_source_ids": [],
-                        "item_b_source_ids": [],
+                        "item_a_citations": [],
+                        "item_b_citations": [],
                     }
                 ],
             }
@@ -237,10 +241,12 @@ class _FakeModelsWithFlakyFirstJudgeCall:
         raise AssertionError(f"unexpected response_schema: {schema}")
 
 
-def _always_ok_search(item_name: str) -> list[SearchResultItem]:
+def _always_ok_search(query: str, **_kwargs) -> list[SearchResultItem]:
     return [
         SearchResultItem(
-            title=f"{item_name} doc", url=f"https://example.com/{item_name}", content=f"{item_name} content"
+            title=f"doc for: {query}",
+            url=f"https://example.com/{abs(hash(query))}",
+            content=f"{query} content",
         )
     ]
 
