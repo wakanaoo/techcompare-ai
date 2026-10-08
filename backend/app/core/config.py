@@ -31,7 +31,15 @@ class Settings(BaseSettings):
     #
     # comparison生成・LLM Judge双方のGemini呼び出しに共通で適用する、
     # 連続リクエスト間の最小間隔(秒)。0にすると間隔を空けない(旧挙動)。
-    gemini_min_request_interval_seconds: float = 4.0
+    #
+    # Free Tierの実測RPM上限(Google AI Studioのrate limitsページで確認: 5
+    # requests/minute)に対し、`60 / (RPM - 1)` = 15.0秒を既定値にしている
+    # (RPM上限そのものではなく、RPM-1を分母にすることで、jitter・サーバー側の
+    # 判定ウィンドウとのクロック差・retry自体の消費を吸収する安全マージンを
+    # 確保する)。旧値(4.0秒)は60/4=15 req/min相当のペースを許してしまい、
+    # 上限5 req/minに対して安全マージンが無かった(実測でも6/5request/minの
+    # 超過が確認された)。
+    gemini_min_request_interval_seconds: float = 15.0
     # 429/503retry時の指数バックオフの基準値(秒)。実際の待機は
     # base * 2^attempt + jitter(Retry-Afterヘッダがあればそちらを優先)。
     gemini_retry_backoff_base_seconds: float = 1.0

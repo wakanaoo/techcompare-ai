@@ -300,6 +300,20 @@ def test_generate_structured_logs_never_contain_prompt_or_source_text(monkeypatc
         assert len(record.message) < 300  # 大量テキストが紛れ込んでいないことの簡易確認
 
 
+# --- Phase 5G: RPM対策(pacing既定値) ---------------------------------------
+
+
+def test_gemini_min_request_interval_default_is_15_seconds():
+    """Free TierのRPM上限(5 req/min)に対し、`60 / (RPM - 1)` = 15秒の安全
+    マージンを既定値としていることの回帰テスト(旧値4.0秒はRPM上限に対し
+    安全マージンが無く、実測でも上限超過が確認されたため変更した)。
+    """
+    from app.core.config import Settings
+
+    default = Settings.model_fields["gemini_min_request_interval_seconds"].default
+    assert default == 15.0
+
+
 # --- Phase 4.1: rate-limit resilience(backoff/jitter/Retry-After/pacing) ---
 
 

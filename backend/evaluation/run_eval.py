@@ -7,6 +7,31 @@
 `run_research()` / `generate_comparison()` 等の本番コードは一切変更しない。
 Gemini/Tavilyの実際の呼び出し回数・token使用量は
 `evaluation.usage_capture` の薄いラッパーで計測する。
+
+Phase 5G: 複数日に分けた実行(resume)について
+Free Tierの日次上限(RPD)が、固定15ケースのcomparison + Judge最大5ケースで
+ちょうど使い切る設計になっており、retryの余地が無いことが判明した
+(README/事後調査参照)。`run_evaluation()`(1プロセスで15件+Judgeを
+一度に実行する既存の経路)はテスト・小規模dry run用に変更せず残しつつ、
+以下を新設する:
+  - `run_stage_a_cases()`: 指定ケースのうち、`resume_state.ResumeState`上で
+    まだ一度も試行していない(unattempted)ケースだけについてStage A
+    (comparison生成)を実行し、実行結果(research_id・status・実測usage)を
+    stateへ逐次保存する。completed/failedのいずれもterminalとして扱い
+    再実行しない(試行済みケースを誤って再実行してRPDを浪費しない、かつ
+    failed caseを後日成功するまでやり直してCompletion Rateを人工的に
+    改善させない、という2つの理由による)。
+  - `collect_stage_a_results()`: stateに記録済みのresearch_idから、
+    DBに保存済みの結果を再構築する(再度Tavily/Geminiを呼ばない)。
+  - `sum_stage_a_usage_from_state()`: 複数日に分けて実行されたcase群の
+    実測usageを、state(ファイル)から合算する(メモリ上のUsageRecorderは
+    プロセスをまたげないため)。
+  - `_run_judge_stage()`: 既存`run_evaluation()`のStage B部分を切り出した
+    もので、Stage Aの完成した結果(`case_results`)さえあれば、
+    Stage Aを実行したプロセス/日と独立して呼び出せる。
+
+いずれも本番コード(`app/`配下)は一切変更しない。新規のDBテーブル・
+ジョブキューは追加しない(`evaluation.resume_state`参照)。
 """
 
 from __future__ import annotations
@@ -30,6 +55,7 @@ from evaluation.judge import (
     aggregate_judge_claims,
     run_judge_for_case,
 )
+from evaluation.resume_state import CaseState, ResumeState
 from evaluation.usage_capture import (
     UsageRecorder,
     capture_gemini_usage,
@@ -183,6 +209,66 @@ def _load_case_result(case: EvaluationCase, research_id: int) -> CaseRunResult:
         db.close()
 
 
+def _run_judge_stage(
+    case_results: list[CaseRunResult],
+    target_judge_ids: list[str],
+) -> tuple[list[str], list[str], list[JudgeFailure], list[tuple[str, ClaimJudgment]]]:
+    """Stage B: 指定ケースについてLLM Judgeを実行する。
+
+    `run_evaluation()`(1プロセスで一括実行)と、`run_stage_b_judge_and_report()`
+    (Stage Aと別日/別プロセスで実行)の両方から共有される(Phase 5G切り出し。
+    ロジック自体は変更していない)。
+
+    1ケースのJudge失敗(一時的なAPIエラー等)でEvaluation全体を止めない。
+    Stage Aで既に成功しているルールベースmetricsは、Judgeの成否に関わらず
+    必ず保持し、最後まで処理を進めてレポートを生成できるようにする。
+    """
+    results_by_case_id = {r.case.case_id: r for r in case_results}
+    judged_case_ids: list[str] = []
+    skipped_judge_case_ids: list[str] = []
+    failed_judge_cases: list[JudgeFailure] = []
+    judged_claims: list[tuple[str, ClaimJudgment]] = []
+
+    for case_id in target_judge_ids:
+        result = results_by_case_id.get(case_id)
+        if result is None or result.judge_input is None:
+            # 対象ケースがEvaluation Setに無い、またはstatus!=completedで
+            # Judgeできる比較結果が無い(失敗ケースはルールベースの
+            # Research Completion Rateに反映済みなので、無理にJudgeしない)。
+            # これは「Judgeを試みて失敗した」のではなく「そもそも対象外」。
+            skipped_judge_case_ids.append(case_id)
+            continue
+
+        # run_judge_for_case()自体にはretryを追加しない(既存方針のまま)。
+        # ここで例外を捕捉するのは、1ケースの一時的なAPIエラーで
+        # Evaluation全体をクラッシュさせないため。
+        try:
+            judgment = run_judge_for_case(result.judge_input)
+        except genai_errors.APIError as exc:
+            failed_judge_cases.append(
+                JudgeFailure(
+                    case_id=case_id,
+                    error_type="api_error",
+                    sanitized_error=_sanitize_judge_error(exc),
+                )
+            )
+            continue
+        except Exception as exc:  # noqa: BLE001 - Judge1件の予期しない失敗で全体を止めない
+            failed_judge_cases.append(
+                JudgeFailure(
+                    case_id=case_id,
+                    error_type="unexpected_error",
+                    sanitized_error=_sanitize_judge_error(exc),
+                )
+            )
+            continue
+
+        judged_case_ids.append(case_id)
+        judged_claims.extend((case_id, claim) for claim in judgment.claims)
+
+    return judged_case_ids, skipped_judge_case_ids, failed_judge_cases, judged_claims
+
+
 def run_evaluation(
     cases: list[EvaluationCase] | None = None,
     judge_case_ids: list[str] | None = None,
@@ -192,6 +278,10 @@ def run_evaluation(
     cases / judge_case_idsを指定しない場合は、`dataset.py`の既定値
     (15件・代表5件)を使う。実APIの呼び出し回数を絞ったdry runをしたい
     場合は、casesにEVALUATION_CASESの一部だけを渡せばよい。
+
+    Free Tierの日次上限(RPD)に収まらない本番相当の実行(固定15件+Judge
+    5件)を複数日に分けたい場合は、代わりに`run_stage_a_cases()`と
+    `run_stage_b_judge_and_report()`(resumeに対応)を使うこと。
     """
     target_cases = cases if cases is not None else EVALUATION_CASES
     target_judge_ids = judge_case_ids if judge_case_ids is not None else JUDGE_SAMPLE_CASE_IDS
@@ -210,51 +300,9 @@ def run_evaluation(
         comparison_phase_call_count = len(recorder.gemini_calls)
 
         # --- Stage B: 代表ケースについてLLM Judgeを実行する ---
-        # 1ケースのJudge失敗(一時的なAPIエラー等)でEvaluation全体を止めない。
-        # Stage Aで既に成功しているルールベースmetricsは、Judgeの成否に関わらず
-        # 必ず保持し、最後まで処理を進めてレポートを生成できるようにする。
-        results_by_case_id = {r.case.case_id: r for r in case_results}
-        judged_case_ids: list[str] = []
-        skipped_judge_case_ids: list[str] = []
-        failed_judge_cases: list[JudgeFailure] = []
-        judged_claims: list[tuple[str, ClaimJudgment]] = []
-
-        for case_id in target_judge_ids:
-            result = results_by_case_id.get(case_id)
-            if result is None or result.judge_input is None:
-                # 対象ケースがEvaluation Setに無い、またはstatus!=completedで
-                # Judgeできる比較結果が無い(失敗ケースはルールベースの
-                # Research Completion Rateに反映済みなので、無理にJudgeしない)。
-                # これは「Judgeを試みて失敗した」のではなく「そもそも対象外」。
-                skipped_judge_case_ids.append(case_id)
-                continue
-
-            # run_judge_for_case()自体にはretryを追加しない(既存方針のまま)。
-            # ここで例外を捕捉するのは、1ケースの一時的なAPIエラーで
-            # Evaluation全体をクラッシュさせないため。
-            try:
-                judgment = run_judge_for_case(result.judge_input)
-            except genai_errors.APIError as exc:
-                failed_judge_cases.append(
-                    JudgeFailure(
-                        case_id=case_id,
-                        error_type="api_error",
-                        sanitized_error=_sanitize_judge_error(exc),
-                    )
-                )
-                continue
-            except Exception as exc:  # noqa: BLE001 - Judge1件の予期しない失敗で全体を止めない
-                failed_judge_cases.append(
-                    JudgeFailure(
-                        case_id=case_id,
-                        error_type="unexpected_error",
-                        sanitized_error=_sanitize_judge_error(exc),
-                    )
-                )
-                continue
-
-            judged_case_ids.append(case_id)
-            judged_claims.extend((case_id, claim) for claim in judgment.claims)
+        judged_case_ids, skipped_judge_case_ids, failed_judge_cases, judged_claims = (
+            _run_judge_stage(case_results, target_judge_ids)
+        )
 
     gemini_comparison_usage = sum_usage(recorder.gemini_calls[:comparison_phase_call_count])
     gemini_judge_usage = sum_usage(recorder.gemini_calls[comparison_phase_call_count:])
@@ -272,6 +320,162 @@ def run_evaluation(
         gemini_judge_usage=gemini_judge_usage,
         tavily_call_count=recorder.search_call_count,
     )
+
+
+# --- Phase 5G: 複数日に分けた実行(resume) ----------------------------------
+
+
+def run_stage_a_cases(
+    cases: list[EvaluationCase],
+    state: ResumeState,
+) -> None:
+    """指定されたcasesのうち、stateで既に試行済み(completed/failedいずれか、
+    = `state.attempted_case_ids()`に含まれる)のcaseはスキップし、
+    まだ一度も試行していない(unattempted)caseだけについて本番
+    run_research()を実行する。
+
+    重要: failedも「もう一度試行すれば成功するかもしれない」ものとしては
+    扱わない(resumeを「最終的に成功させる」仕組みにしない)。このEvaluationで
+    測りたいReliabilityは「各固定caseを、その時点の同一条件で1回評価した
+    結果」であり、1 case内の最大3 attempts(既存のrequestレベルのretry、
+    変更しない)を使い切ってfailedになったcaseを翌日以降に再実行すると、
+    Completion Rateが人工的に改善し、Run #2 / Phase 5E / Phase 5Fとの比較が
+    不公平になる。そのためcompleted/failedはいずれもterminal(確定した
+    最終結果)として扱い、再実行しない。resumeの目的は「日次RPD制限のため、
+    まだ評価していないcaseを翌日に続ける」ことに限定する。
+
+    Tavily/Geminiへの実呼び出しは、まだ一度も試行していないcaseに対して
+    のみ発生する(試行済みcaseを誤って再実行し、RPD予算を浪費しないように
+    する、というのがこの関数の主目的)。1ケース実行するごとにstate.save()
+    するので、途中でプロセスが落ちても(RPD上限に達して429が出続ける等)、
+    そこまでの進捗は失われない。
+    """
+    already_attempted = state.attempted_case_ids()
+    for case in cases:
+        if case.case_id in already_attempted:
+            continue
+
+        case_recorder = UsageRecorder()
+        with capture_gemini_usage(case_recorder), count_search_calls(case_recorder):
+            research_id = _create_pending_research(case)
+            run_research(research_id)
+
+        result = _load_case_result(case, research_id)
+        usage = sum_usage(case_recorder.gemini_calls)
+        state.record_case(
+            case.case_id,
+            CaseState(
+                status=result.snapshot.status,
+                research_id=research_id,
+                gemini_call_count=usage["call_count"],
+                gemini_prompt_tokens=usage["prompt_token_count"],
+                gemini_candidates_tokens=usage["candidates_token_count"],
+                gemini_total_tokens=usage["total_token_count"],
+                tavily_call_count=case_recorder.search_call_count,
+            ),
+        )
+        state.save()
+
+
+def collect_stage_a_results(
+    cases: list[EvaluationCase], state: ResumeState
+) -> list[CaseRunResult]:
+    """stateに記録済みのresearch_idから、DBに保存済みの結果を再構築する
+    (再度Tavily/Geminiを呼ばない)。stateにまだ記録が無いcaseはスキップする
+    (呼び出し側で「全件揃っているか」を別途確認すること。例:
+    `run_stage_b_judge_and_report()`)。
+    """
+    results = []
+    for case in cases:
+        case_state = state.stage_a.get(case.case_id)
+        if case_state is None:
+            continue
+        results.append(_load_case_result(case, case_state.research_id))
+    return results
+
+
+def sum_stage_a_usage_from_state(state: ResumeState) -> tuple[dict, int]:
+    """複数日に分けて実行されたcase群の実測Gemini usageとTavily呼び出し回数を、
+    state(ファイル)に保存済みの値から合算する。
+
+    各caseは別プロセス/別日に実行されている可能性があり、メモリ上の
+    UsageRecorderはプロセスをまたげないため、このファイルの実測値を
+    正本として使う(run_stage_a_cases()が1ケースごとに記録している)。
+    """
+    call_count = sum(s.gemini_call_count for s in state.stage_a.values())
+    prompt = sum(s.gemini_prompt_tokens for s in state.stage_a.values())
+    candidates = sum(s.gemini_candidates_tokens for s in state.stage_a.values())
+    total = sum(s.gemini_total_tokens for s in state.stage_a.values())
+    tavily_call_count = sum(s.tavily_call_count for s in state.stage_a.values())
+
+    gemini_comparison_usage = {
+        "call_count": call_count,
+        "prompt_token_count": prompt,
+        "candidates_token_count": candidates,
+        "total_token_count": total,
+    }
+    return gemini_comparison_usage, tavily_call_count
+
+
+def run_stage_b_judge_and_report(
+    state: ResumeState,
+    all_cases: list[EvaluationCase] | None = None,
+    judge_case_ids: list[str] | None = None,
+    out_dir=None,
+) -> dict[str, str]:
+    """Stage A(全ケース)が完了済みのstateに対してJudgeを実行し、従来と
+    同じ形式(JSON + CSV x2)のレポートを書き出す。
+
+    Stage Aを実行したプロセス/日とは独立して呼び出せる(DBとstateファイルだけ
+    から結果を再構築するため、Tavily/Geminiはこの関数内ではJudge以外呼ばない)。
+
+    all_casesの全case_idがstateに記録されていない(=まだ一度も実行を
+    試みていないcaseがある)場合はRuntimeErrorを送出する。「completed」までは
+    要求しない(429/503等で最終的にfailedになったcaseが残っているのは
+    正常なState Aの結果であり、既存のReliability metricsの対象でもあるため)。
+
+    out_dir: write_report()にそのまま渡す(省略時は従来どおり
+    `evaluation/results/`。テストではtmp_pathを渡して本物の結果ディレクトリを
+    汚さないようにする)。
+    """
+    target_cases = all_cases if all_cases is not None else EVALUATION_CASES
+    target_judge_ids = judge_case_ids if judge_case_ids is not None else JUDGE_SAMPLE_CASE_IDS
+
+    missing = [c.case_id for c in target_cases if c.case_id not in state.attempted_case_ids()]
+    if missing:
+        raise RuntimeError(
+            "Stage Aが未実行のcaseが残っています(run_stage_a_casesを先に実行してください): "
+            + ", ".join(missing)
+        )
+
+    case_results = collect_stage_a_results(target_cases, state)
+    gemini_comparison_usage, tavily_call_count = sum_stage_a_usage_from_state(state)
+
+    judge_recorder = UsageRecorder()
+    with capture_gemini_usage(judge_recorder):
+        judged_case_ids, skipped_judge_case_ids, failed_judge_cases, judged_claims = (
+            _run_judge_stage(case_results, target_judge_ids)
+        )
+    gemini_judge_usage = sum_usage(judge_recorder.gemini_calls)
+
+    run_result = EvaluationRunResult(
+        run_at=datetime.now(timezone.utc).isoformat(),
+        model=MODEL,
+        case_results=case_results,
+        judge_cases_requested=list(target_judge_ids),
+        judged_case_ids=judged_case_ids,
+        skipped_judge_case_ids=skipped_judge_case_ids,
+        failed_judge_cases=failed_judge_cases,
+        judged_claims=judged_claims,
+        gemini_comparison_usage=gemini_comparison_usage,
+        gemini_judge_usage=gemini_judge_usage,
+        tavily_call_count=tavily_call_count,
+    )
+
+    from evaluation.report import write_report  # 循環import回避のため関数内でimport
+
+    aggregate = build_aggregate(run_result)
+    return write_report(run_result, aggregate, out_dir=out_dir)
 
 
 def build_aggregate(run_result: EvaluationRunResult) -> dict:
@@ -315,10 +519,34 @@ def build_aggregate(run_result: EvaluationRunResult) -> dict:
     return aggregate
 
 
-if __name__ == "__main__":
-    # 実APIを使った本実行のエントリーポイント。
-    # ユーザーの承認前にこのスクリプトを直接実行しないこと
-    # (README Phase4セクション「実行方法」を参照)。
+def _parse_case_ids_arg(raw: str | None) -> list[str] | None:
+    if raw is None:
+        return None
+    return [c.strip() for c in raw.split(",") if c.strip()]
+
+
+def _main() -> None:
+    """実APIを使った本実行のエントリーポイント。
+    ユーザーの承認前にこのスクリプトを直接実行しないこと
+    (README Phase4セクション「実行方法」を参照)。
+
+    Phase 5G: Free Tierの日次上限(RPD)が固定15ケース+Judge5ケースで
+    ちょうど使い切る設計だったため、`--stage`で複数日に分けて実行できる
+    ようにした(README/事後調査参照)。
+
+    - 引数無し(従来どおり): 固定15件+Judgeを1プロセスで一括実行する
+      (dry runや、RPD上限を気にしない環境向け。挙動は変更していない)。
+    - `--run-id RUN_ID --stage comparison [--cases c01,c02,...]`:
+      Stage Aのうち、まだ一度も試行していない(unattempted)caseだけを実行し、
+      `evaluation/results/resume_state/RUN_ID.json` に進捗を保存する。
+      completed/failedいずれも再実行しない(terminal)。
+      `--cases`省略時は、まだunattemptedな全15ケースが対象になる。
+    - `--run-id RUN_ID --stage judge [--judge-cases c01,...]`:
+      既存のstateから全15ケース分のStage A結果を読み込み、Judgeを実行して
+      最終的なレポート(JSON + CSV x2、従来と同じ形式)を書き出す。
+      全15ケースがstateに記録されていない場合はエラーになる。
+    """
+    import argparse
     import logging
 
     from evaluation.report import write_report
@@ -330,7 +558,68 @@ if __name__ == "__main__":
     # research_done)がここで見えるようになる。
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
 
-    result = run_evaluation()
-    aggregate = build_aggregate(result)
-    paths = write_report(result, aggregate)
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--run-id",
+        default=None,
+        help="複数日に分けて実行する際にStage A/Judgeを束ねる識別子。"
+        "省略時は従来どおり1プロセスで一括実行する(--stageも無視される)。",
+    )
+    parser.add_argument("--stage", choices=["comparison", "judge"], default=None)
+    parser.add_argument(
+        "--cases",
+        default=None,
+        help="(--stage comparison用)実行対象のcase_idをカンマ区切りで指定。"
+        "省略時はまだunattemptedな全ケースが対象(completed/failedは再実行しない)。",
+    )
+    parser.add_argument(
+        "--judge-cases",
+        default=None,
+        help="(--stage judge用)Judge対象のcase_idをカンマ区切りで指定。"
+        "省略時はdataset.JUDGE_SAMPLE_CASE_IDS(既定5件)。",
+    )
+    args = parser.parse_args()
+
+    if args.run_id is None:
+        # 従来どおり: 1プロセスで固定15件+Judgeを一括実行する。
+        result = run_evaluation()
+        aggregate = build_aggregate(result)
+        paths = write_report(result, aggregate)
+        print(f"Evaluation結果を書き出しました: {paths}")
+        return
+
+    if args.stage is None:
+        parser.error("--run-idを指定する場合は--stageも指定してください。")
+
+    from evaluation.resume_state import load as load_resume_state
+
+    state = load_resume_state(args.run_id)
+
+    if args.stage == "comparison":
+        requested_ids = _parse_case_ids_arg(args.cases)
+        if requested_ids is None:
+            target_cases = EVALUATION_CASES
+        else:
+            from evaluation.dataset import get_case_by_id
+
+            target_cases = [get_case_by_id(cid) for cid in requested_ids]
+
+        run_stage_a_cases(target_cases, state)
+
+        done = state.completed_case_ids()
+        attempted = state.attempted_case_ids()
+        all_ids = {c.case_id for c in EVALUATION_CASES}
+        print(
+            f"run_id={args.run_id}: comparison完了={len(done)}/{len(all_ids)}件 "
+            f"(試行済み={len(attempted)}件、未着手={sorted(all_ids - attempted)})"
+        )
+        return
+
+    # args.stage == "judge"
+    judge_case_ids = _parse_case_ids_arg(args.judge_cases)
+    paths = run_stage_b_judge_and_report(state, judge_case_ids=judge_case_ids)
     print(f"Evaluation結果を書き出しました: {paths}")
+
+
+if __name__ == "__main__":
+    _main()

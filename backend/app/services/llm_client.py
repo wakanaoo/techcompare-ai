@@ -61,11 +61,25 @@ prompt文字列の内容のみ)。数値の論理的な包含関係(「15年以�
 以上」を否定しない等)まで判定するbackend側の検証や、本番への常時LLM
 Judge導入は、効果に対する複雑性・コストの観点から今回は見送った
 (README参照)。
+
+Phase 5G: Error diagnosticsについて
+Phase 5FのログはHTTP status(429/503)しか記録しておらず、429がrate
+limit/quota exhaustionのどれに該当するか、503が何を意味するかを事後に
+判別できなかった。`_extract_error_diagnostics()`で、genai_errors.APIError
+が持つstatus(Google側のenum文字列。例: RESOURCE_EXHAUSTED)と、
+`error.details`配列中のErrorInfo.reason / QuotaFailure.violations[].
+quotaMetric・quotaIdをbest-effortで取り出し、ログに追加した。
+exc.message(Google側の自由文)とexc.details全体は、今回は出さない
+(README/報告参照。status/reason/quota_metric/quota_idという識別子だけで
+診断可能な設計を優先した)。Googleのエラーレスポンス形状は将来変わり得る
+ため、想定した構造が無ければ黙ってNoneを返す(diagnostics抽出自体が
+retry/ログ出力を壊さないようにする)。
 """
 
 import logging
 import random
 import time
+from dataclasses import dataclass
 
 from google import genai
 from google.genai import errors as genai_errors
@@ -161,6 +175,70 @@ def _extract_retry_after_seconds(exc: Exception) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+@dataclass(frozen=True)
+class _ErrorDiagnostics:
+    """429/503発生時にログへ出す、構造化された診断情報だけを保持する値。
+
+    `exc.message`は意図的に持たない(Googleの定型文であり通常は機密情報を
+    含まないと見られるが、自由文であることに変わりはなく、今回はstatus/
+    reason/quota_metric/quota_idという識別子だけで429/503の種別を区別する
+    設計を優先し、messageまでは出さないことにした)。
+    """
+
+    status: str | None
+    reason: str | None
+    quota_metric: str | None
+    quota_id: str | None
+
+
+def _extract_error_diagnostics(exc: Exception) -> _ErrorDiagnostics:
+    """429/503のSDK例外(genai_errors.APIError)から、ログに出しても安全な
+    構造化情報だけをbest-effortで取り出す。
+
+    `exc.details`(google-genai内部では、Googleのエラーレスポンスの生JSON
+    全体を指す。Google API自体の慣例でのネストした`error.details`配列とは
+    別物)は丸ごとログに出さない。ここではGoogleのエラーモデル
+    (google.rpc.Status/ErrorInfo/QuotaFailureの慣例)に沿って、
+    `error.details`配列の中から`reason`(ErrorInfo)・`quotaMetric`/
+    `quotaId`(QuotaFailure.violations)だけを拾う。
+
+    Googleのレスポンス形状は保証された公開APIではなく、将来変わり得る。
+    想定した構造が見つからない場合は例外を送出せず、該当フィールドを
+    Noneのまま返す(呼び出し側のログ出力・retry判定を壊さないため)。
+    """
+    status = getattr(exc, "status", None)
+    reason: str | None = None
+    quota_metric: str | None = None
+    quota_id: str | None = None
+
+    try:
+        raw_details = getattr(exc, "details", None) or {}
+        error_details = raw_details.get("error", {}).get("details", [])
+        if not isinstance(error_details, list):
+            error_details = []
+    except Exception:  # noqa: BLE001 - 形状がどう変わっても診断ログ自体は落とさない
+        error_details = []
+
+    for entry in error_details:
+        try:
+            if not isinstance(entry, dict):
+                continue
+            entry_type = str(entry.get("@type", ""))
+            if reason is None and "ErrorInfo" in entry_type:
+                reason = entry.get("reason")
+            if quota_metric is None and "QuotaFailure" in entry_type:
+                violations = entry.get("violations")
+                if isinstance(violations, list) and violations and isinstance(violations[0], dict):
+                    quota_metric = violations[0].get("quotaMetric")
+                    quota_id = violations[0].get("quotaId")
+        except Exception:  # noqa: BLE001 - 1エントリの異常な形状で全体を諦めない
+            continue
+
+    return _ErrorDiagnostics(
+        status=status, reason=reason, quota_metric=quota_metric, quota_id=quota_id
+    )
 
 
 def _compute_backoff_seconds(attempt: int, exc: Exception) -> tuple[float, bool]:
@@ -318,17 +396,26 @@ def _generate_structured(
         except (genai_errors.ServerError, genai_errors.ClientError) as exc:
             duration_seconds = time.monotonic() - attempt_start
             status_code = getattr(exc, "code", "unknown")
+            # Phase 5G: Error diagnostics。exc.message(自由文)は出さず、
+            # status/reason/quota_metric/quota_idという識別子だけを拾う
+            # (_extract_error_diagnostics参照。exc.details全体は出さない)。
+            diagnostics = _extract_error_diagnostics(exc)
             is_last_attempt = attempt == max_attempts - 1
             if not _is_retryable_error(exc) or is_last_attempt:
                 logger.warning(
                     "gemini_request request_type=%s attempt=%d/%d pacing_wait_s=%.2f "
-                    "duration_s=%.2f outcome=failure status=%s",
+                    "duration_s=%.2f outcome=failure status=%s error_status=%s "
+                    "reason=%s quota_metric=%s quota_id=%s",
                     request_label,
                     attempt + 1,
                     max_attempts,
                     pacing_wait_seconds,
                     duration_seconds,
                     status_code,
+                    diagnostics.status,
+                    diagnostics.reason,
+                    diagnostics.quota_metric,
+                    diagnostics.quota_id,
                 )
                 raise
             # 1回だけ計算し、同じ値をログとtime.sleep()の両方に使う
@@ -337,7 +424,8 @@ def _generate_structured(
             backoff_seconds, used_retry_after = _compute_backoff_seconds(attempt, exc)
             logger.warning(
                 "gemini_request request_type=%s attempt=%d/%d pacing_wait_s=%.2f "
-                "duration_s=%.2f outcome=failure status=%s retry_after_used=%s "
+                "duration_s=%.2f outcome=failure status=%s error_status=%s "
+                "reason=%s quota_metric=%s quota_id=%s retry_after_used=%s "
                 "backoff_s=%.2f",
                 request_label,
                 attempt + 1,
@@ -345,6 +433,10 @@ def _generate_structured(
                 pacing_wait_seconds,
                 duration_seconds,
                 status_code,
+                diagnostics.status,
+                diagnostics.reason,
+                diagnostics.quota_metric,
+                diagnostics.quota_id,
                 used_retry_after,
                 backoff_seconds,
             )

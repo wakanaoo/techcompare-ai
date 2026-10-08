@@ -27,7 +27,7 @@ from google.genai import types
 from pydantic import BaseModel, Field
 
 from app.core.config import settings
-from app.services.llm_client import MODEL, pace_gemini_request
+from app.services.llm_client import MODEL, _extract_error_diagnostics, pace_gemini_request
 
 # Phase 5F: Observability。promptの内容・Evidence本文等はログに出さない
 # (case_id・attempt・所要時間・成功/失敗・HTTP statusのみ)。
@@ -160,13 +160,21 @@ def run_judge_for_case(case: JudgeCaseInput) -> CaseJudgmentResult:
         )
     except (genai_errors.ServerError, genai_errors.ClientError) as exc:
         duration_seconds = time.monotonic() - attempt_start
+        # Phase 5G: Error diagnostics。comparison生成側と同じ抽出ロジックを
+        # 共有する(app.services.llm_client._extract_error_diagnostics参照)。
+        diagnostics = _extract_error_diagnostics(exc)
         logger.warning(
             "gemini_request request_type=judge case_id=%s attempt=1/1 "
-            "pacing_wait_s=%.2f duration_s=%.2f outcome=failure status=%s",
+            "pacing_wait_s=%.2f duration_s=%.2f outcome=failure status=%s "
+            "error_status=%s reason=%s quota_metric=%s quota_id=%s",
             case.case_id,
             pacing_wait_seconds,
             duration_seconds,
             getattr(exc, "code", "unknown"),
+            diagnostics.status,
+            diagnostics.reason,
+            diagnostics.quota_metric,
+            diagnostics.quota_id,
         )
         raise
 

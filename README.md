@@ -726,7 +726,9 @@ Requests)が多発したことを受け、`app/services/llm_client.py`に以下�
 (Redis/Celery等の新規インフラは使わず、単一プロセス内で完結):
 
 - `pace_gemini_request()`: Gemini APIへの連続リクエストの間に、Settings
-  経由で調整可能な最小間隔(既定4秒)を空ける。comparison生成
+  経由で調整可能な最小間隔(既定15秒。当初は4秒だったが、Phase 5Gで
+  Free Tierの実測RPM上限に対して安全マージンが無いことが判明し変更した。
+  詳細は後述のPhase 5G参照)を空ける。comparison生成
   (本番コード)とLLM Judge(`evaluation/judge.py`)は同じGemini API利用
   とみなし、同じペース管理を共有する。
 - 429/503のretry待機時間は、レスポンスにRetry-Afterヘッダがあれば
@@ -863,6 +865,36 @@ Retry-Afterの使用有無は、既存のretry処理が1回だけ計算した値
 出す設定を追加している(pytest実行時・APIサーバー実行時の挙動には
 影響しない)。
 
+### Phase 5G: RPM/RPD対策とEvaluationのResume
+
+Phase 5Fのログを使って429/503を調査した結果、Google AI Studioの実測で
+このプロジェクトのGemini Free Tierが **RPM 5・TPM 250K・RPD 20** で
+あること、過去28日の最大使用量がRPM 6/5・RPD 24/20と**実際に上限超過して
+いた**ことを確認した。また、インストール済み`google-genai==1.2.0`の
+コードを確認し、SDK内部に自動retryが存在しないこと(アプリ側の最大3
+attemptsが唯一のretry層であり、二重retryではないこと)も確認した。
+これを受けて以下を変更した(本番の比較生成ロジック自体は変更していない):
+
+- **pacing**: `gemini_min_request_interval_seconds`の既定値を4秒→15秒に
+  変更(`60 / (RPM-1)`。RPM上限そのものではなくRPM-1を分母にして安全
+  マージンを確保する)。
+- **Error diagnostics**: 429/503発生時、`exc.status`と`exc.details`から
+  best-effortで`reason`/`quota_metric`/`quota_id`をログに追加した
+  (`exc.message`・`exc.details`全体はログに出さない)。
+- **EvaluationのResume**: 固定15ケースのcomparison + Judge最大5ケースが
+  RPD 20をretryの余地なく使い切ってしまうため、`evaluation/run_eval.py`に
+  `--run-id`/`--stage {comparison,judge}`を追加し、日をまたいで分割実行
+  できるようにした(`evaluation/resume_state.py`)。**completed/failedは
+  いずれもterminalとして扱い、再実行しない**(failedなケースを後日成功
+  するまでやり直すとCompletion Rateが人工的に改善し、Run #2 / Phase 5E /
+  Phase 5Fとの比較可能性が壊れるため)。固定15ケース・Judge5ケースという
+  標本数自体は変更していない。
+
+```bash
+python -m evaluation.run_eval --run-id 2026-10 --stage comparison --cases c01,c02,...
+python -m evaluation.run_eval --run-id 2026-10 --stage judge
+```
+
 ### Evaluationの限界
 
 - Evaluation Setは固定15ケースであり、統計的に十分な標本数とは言えない。
@@ -871,17 +903,21 @@ Retry-Afterの使用有無は、既存のretry処理が1回だけ計算した値
   さらに際立った。
 - LLM Judge自体がLLM-as-a-Judge方式であり、判定そのものにLLMの
   バイアス・誤りが含まれうる(人手によるgold-standard評価ではない)。
-- Phase 5Eで観測された429/503の増加要因(コード変更 vs 外部要因)は、
-  Phase 5Fでログを追加した時点では未検証(次回Full Evaluation実行時に
-  ログを確認する)。
+- Phase 5Eで観測された429/503は、Phase 5Gの調査でRPM/RPD上限の実際の
+  超過が確認された(前述Phase 5G参照)。ただし429がRPM/RPD/TPMのどれに
+  起因するかの個別切り分け(Phase 5G追加のError diagnostics)は、次回
+  実際に429/503が発生するまで実データで検証できていない。
 
 ### 実行方法
 
 ```bash
 cd backend && source venv/bin/activate
 pytest                       # evaluation配下のmock/unit testも含めて確認
-python -m evaluation.run_eval  # 実API(Tavily/Gemini)を使った本実行
+python -m evaluation.run_eval  # 実API(Tavily/Gemini)を使った、1プロセス一括の本実行
 ```
+
+Free TierのRPD上限(20)に収まらない場合は、Phase 5G追加の`--run-id`/
+`--stage`オプションで日をまたいで分割実行できる(前述Phase 5G参照)。
 
 本実行は、Evaluation Set全件分のTavily/Gemini API呼び出しを実際に行う
 (既定: Tavily 45回=3クエリ/research×15、Gemini 最大20回=比較生成15+
@@ -897,8 +933,9 @@ Judge5。Tavily呼び出し回数はPhase 5D-aで2→3クエリ/researchに変�
 
 ### 今後(Phase 4スコープ外)
 
-- Phase 5F追加後のログを使って、429/503がコード変更由来か外部要因かを
-  実際に切り分けるための再評価(ユーザーの承認を得てから実施する)。
+- Phase 5G追加のError diagnostics(status/reason/quota_metric/quota_id)
+  が、次回実際に429/503が発生した際に意図通り機能するかの実データでの
+  検証(ユーザーの承認を得てから、分割実行したEvaluationで確認する)。
 - Phase 5D-eで見送った、claim単位でcitationを紐付けるschema再設計、
   本番への常時LLM Judge導入(コスト増を許容する判断が必要)。
 - History画面: 過去のResearch一覧を表示する。
