@@ -1,34 +1,191 @@
 # TechCompare AI
 
-技術選定(例: FastAPI vs Django)を、複数の情報源の調査・構造化・比較・根拠提示によって
-サポートするResearch & Comparison Toolです。AI/Web開発の学習ツールも兼ねています。
+技術選定(例: 「FastAPIとDjango、個人開発のAI Webアプリにどちらが向いているか」)を、
+**AIによるWeb調査・比較軸ごとの構造化・一次情報への根拠提示**によってサポートする
+Research & Comparison Toolです。個人開発のポートフォリオ兼、AI/Web開発の学習プロジェクトです。
 
-**現在のフェーズ: Phase 3 (Web検索による根拠付け)**
+> **現在の実装状況**: Explore(技術カタログの閲覧)・Compare(2技術の比較調査)・
+> Evidence Viewer(根拠の確認)・Suggest Points(AIによる追加比較軸の提案)が
+> 一通り動作する状態です(開発経緯は本READMEの後半、Phase 1〜5Gを参照)。
+> Web一般公開・認証機能・本格的なジョブキューは未実装です(詳細は
+> [現在の制約と今後の改善予定](#現在の制約と今後の改善予定)を参照)。
 
-New Research画面 → `POST /research` → PostgreSQLへ保存 →
-**Web検索(Tavily API)で情報源を取得・保存** → 取得した情報源を根拠として
-LLM(Gemini API)を1回呼び出しStructured Outputで比較結果取得 →
-PostgreSQLへ保存 → Comparison Report画面で表示、Evidence Viewerで
-根拠を確認、という流れが動く状態です。
+## 目次
 
-処理は「2-stage pipeline」(検索 → grounded comparison生成)と呼んでいます。
-**LLM呼び出しは1回だけ**です(検索とLLM呼び出しを分離しているだけで、
-LLMを2回呼んでいるわけではありません)。
+- [このプロジェクトで解決したい課題](#このプロジェクトで解決したい課題)
+- [主な機能とユーザー体験](#主な機能とユーザー体験)
+- [システム構成](#システム構成)
+- [AIによる調査・比較・根拠表示の仕組み](#aiによる調査・比較・根拠表示の仕組み)
+- [Evaluationによる品質評価の取り組み](#evaluationによる品質評価の取り組みサマリ)
+- [API制限・503エラーへの対応(Reliability Engineering)](#api制限・503エラーへの対応reliability-engineering)
+- [現在の制約と今後の改善予定](#現在の制約と今後の改善予定)
+- [技術構成](#技術構成)
+- [ディレクトリ構成](#ディレクトリ構成)
+- [セットアップ手順(ローカルでの起動方法)](#セットアップ手順)
+- [詳細な設計ログ(Phase別の開発経緯)](#llm-provider選定)
 
-> **既知の限界**: 検索結果に基づいてLLMが比較を生成しますが、LLMの回答が
-> 情報源の内容を完全に正確に要約している保証はありません。Evidence Viewerで
-> 必ず元の情報源(URL)も確認してください。
+## このプロジェクトで解決したい課題
+
+新しい技術を選ぶとき、公式ドキュメントや比較記事を何件も読み、目的(利用シーン)に
+合わせて要点を自分の頭の中で整理し直す作業は地味に時間がかかります。また、AIに
+直接「FastAPIとDjangoを比較して」と聞くと、根拠不明な断定や、実際には存在しない
+情報(ハルシネーション)が混ざるリスクがあります。
+
+TechCompare AIは、この2つの問題に対して
+
+1. **検索と生成を分離する**: AIに「知っていること」を話させず、実際にWeb検索した
+   情報源に基づいて比較させる(詳細は[システム構成](#システム構成)参照)。
+2. **根拠を「引用座標の選択」に限定する**: AIに引用文そのものを生成させず、
+   どの情報源のどの一節を根拠にしたかだけを選ばせ、表示する文章は必ず実在する
+   Webページの内容にする(詳細は[AIによる調査・比較・根拠表示の仕組み](#aiによる調査・比較・根拠表示の仕組み)参照)。
+
+という設計で応えることを目指しています。
+
+## 主な機能とユーザー体験
+
+| 機能 | できること |
+|---|---|
+| **Explore**(技術カタログ) | カテゴリ別に技術を一覧し、各技術の概要・関連技術を確認できる |
+| **Compare**(比較調査) | 2つの技術・利用目的(goal)・比較軸(criteria)を指定して調査を開始できる。比較軸は固定候補から選ぶほか、自由入力(custom criteria)も可能 |
+| **Suggest Points**(AIによる比較軸提案) | 指定した技術・目的に対し、まだ選んでいない比較軸をGeminiに提案させ、ワンクリックで追加できる(`POST /suggest-criteria`) |
+| **Research Progress** | 調査の進行状況をpollingで表示する |
+| **Comparison Report** | 比較軸ごとのスコア・勝敗・サマリ、総合的なRecommendationを表示する |
+| **Evidence Viewer** | AIの各サマリがどのWebページの、どの一節を根拠にしているかを、実際のURLとverbatim(改変なし)のテキストで確認できる |
+
+トップページは「Learn(Explore)」「Compare」という2つの同格の入口だけを見せる
+ミニマルな構成にしており、Compareはクリックするまでフォームを展開しません
+(認知負荷を上げないためのUI上の工夫)。
+
+## システム構成
+
+```mermaid
+flowchart LR
+    User(["ユーザー"])
+
+    subgraph Frontend["Frontend (Next.js / React / TypeScript)"]
+        FE["Explore / Compare /\nResearch Progress /\nComparison Report /\nEvidence Viewer"]
+    end
+
+    subgraph Backend["Backend (FastAPI)"]
+        API["REST API\n/research, /evidence, /suggest-criteria"]
+        Runner["research_runner\n(BackgroundTasksで非同期実行)"]
+    end
+
+    DB[("PostgreSQL\nResearch / Comparison / Source / Evidence")]
+    Tavily[("Tavily API\nWeb検索")]
+    Gemini[("Google Gemini API\nStructured Output")]
+
+    User --> FE
+    FE -- "REST (polling含む)" --> API
+    API --> DB
+    API -- "非同期で開始" --> Runner
+    Runner -- "① 3クエリで検索し\n情報源をDBへ保存" --> Tavily
+    Runner -- "② 保存済み情報源を根拠に\n比較結果を1回だけ生成" --> Gemini
+    Runner --> DB
+```
+
+処理の流れ(「2-stage pipeline」と呼んでいます):
+**① Web検索(Tavily)で情報源を取得・保存 → ② 保存済みの情報源だけを根拠に、
+LLM(Gemini)を1回だけ呼び出してStructured Outputで比較結果を生成**。
+検索とLLM呼び出しを明確に分離しているのがポイントで、LLMは「調査済みの事実から
+構造化する」役割に限定し、Web検索を自分で何度もやり直す自律エージェント的な
+設計は採用していません(1 Researchあたり Tavily 3回・Gemini 1回で完結する、
+予測可能でコスト管理しやすい設計です)。
+
+## AIによる調査・比較・根拠表示の仕組み
+
+**Hallucination対策としての「引用座標の選択」方式**: LLMには根拠本文
+(evidence text)そのものを生成させません。LLMが担うのは「提供した情報源のうち、
+どのchunk(文単位に分割した一節)を根拠にしたか」を`{source_id, chunk_index}`という
+**座標**で選ぶことだけです。これにより、Evidence Viewerに表示される文章は
+必ず実在するWebページの内容になることを保証しています。LLMが返した座標は、
+backend側で必ず実在するsource・範囲内のchunkかを検証し、不正な座標が返ってきた
+場合はEvidenceを作らず無視します(詳細は後述の
+[`item_a_citations` / `item_b_citations`](#item_a_citations-/-item_b_citationsphase-3で導入、phase-5dでchunk単位に拡張)セクション)。
+
+**検索クエリの設計**: 1 Researchあたり常に3クエリ(criteria件数に比例させない、
+O(1)設計)。技術名向け2クエリは英語中心で公式ドキュメントのretrievalを狙い、
+比較記事向け1クエリは日本語で第三者の比較記事を狙う、という役割分担をしています
+(実データ検証で、日本語の長いクエリが英語の公式ドキュメントのretrieval自体を
+妨げることが判明したための対策。詳細は後述の
+[Phase 5D-c](#phase-5d-c-query-languageの戦略検索言語の切り分け))。
+
+**Noise filteringとchunking**: 取得した本文からnavigationテキストや破損データ等の
+明らかなノイズ行を削除し(要約・言い換えは一切しない)、文単位のchunkに分割して
+からLLMに提示します。LLM summaryの具体的な数値・固有の事実は、実際に引用した
+chunkに書かれている場合にのみ記述し、情報源間で数値が食い違う場合は定性的な表現に
+留める、という指示をプロンプトに明記しています(prompt-onlyの対策であり、
+Geminiが実際に従う保証はないことも[既知の制限](#現在の制約と今後の改善予定)として明記しています)。
+
+## Evaluationによる品質評価の取り組み(サマリ)
+
+「AIが生成した比較結果の品質」を勘で判断しないよう、固定15ケースの評価セット
+(`backend/evaluation/`)を用意し、本番と全く同じ処理(`run_research()`)に通して
+計測する仕組みを作りました(詳細は後述の[Phase 4: AI Evaluation](#phase-4-ai-evaluation)参照)。
+
+- **Reliability metrics**(15件全件・追加のLLM呼び出し不要): パイプラインが
+  完走したか(Research Completion Rate)、失敗種別、レイテンシ、API呼び出し回数・
+  token使用量をDBの保存結果だけから機械的に計算します。
+- **Answer-quality metrics**(completedケースのみ): Comparison Completeness、
+  Evidence Coverage、Source Utilization、Recommendation Consistencyに加え、
+  代表5ケースについてLLM Judge(Gemini)でEvidence CorrectnessとUnsupported Claimを
+  判定します。failedケースを0点として品質平均に混ぜない、という整理は実際に
+  過去のバグ(Run #1で発生)を踏まえた設計です。
+
+これまでに**Run #1(Baseline)→ Run #2(rate-limit対策後)→ Phase 5E(検索ロジック
+改善後)**の3回、実APIを使った評価を実施しています。結果は都合の良い数字だけを
+拾わず、**改善した指標(例: Evidence Coverage)と悪化した指標(例: Source
+Utilization、Reliability)の両方をそのまま記録**しています。この「悪化も含めて
+正直に書く」姿勢自体が、Reliability低下の原因調査(Phase 5F・5G)につながっています。
+
+## API制限・503エラーへの対応(Reliability Engineering)
+
+Full Evaluationの実行中にGemini APIの429(レート制限)・503(一時的な過負荷)が
+多発する事象に遭遇し、場当たり的な対処ではなく、原因調査→設計→実装の順で
+対応しました(詳細は後述の[Phase 5F](#phase-5f-observabilityretry/pacingの事後確認を可能にする最小ログ)・
+[Phase 5G](#phase-5g-rpm/rpd対策とevaluationのresume)参照)。
+
+1. **観測できる状態を作る**(Phase 5F): retry試行回数・backoff秒数・HTTP
+   statusをログに出す最小限のObservabilityを追加(prompt本文等の機密・大量
+   テキストは一切ログに出しません)。
+2. **原因を実測で確認する**(Phase 5G): Google AI Studioでこのプロジェクトの
+   Gemini Free Tierの実際のRate Limits(RPM 5・TPM 250K・RPD 20)を確認し、
+   過去28日間で実際に上限超過(RPM 6/5、RPD 24/20)していたことを突き止めました。
+   インストール済みSDKのコードも確認し、SDK自体には自動retryが存在しないこと
+   (アプリ側の最大3 attemptsが唯一のretry層)も検証しました。
+3. **対策を実装する**(Phase 5G):
+   - pacingの既定値を4秒→15秒に変更(`60 / (RPM-1)`で安全マージンを確保)。
+   - 429/503発生時、`status`/`reason`/`quota_metric`/`quota_id`をbest-effortで
+     ログへ追加(exc.message・exc.details全体は出さない、best-effort・
+     defensive parsing)。
+   - 固定15ケースのEvaluationが無料枠の日次上限(RPD 20)をretryの余地なく
+     使い切ってしまう問題に対し、`--run-id`/`--stage`オプションで日をまたいで
+     分割実行できるResume機能を追加。**completed/failedのいずれもterminalとして
+     扱い、再実行しない**設計にしており、「failedなケースを後日成功するまで
+     やり直してCompletion Rateを人工的に改善する」ことを防いでいます
+     (過去Runとの比較可能性を守るための設計判断です)。
+
+**誠実な現状報告**: この対策は201件のmock単体テストと、実データでの小規模な
+動作確認(1ケースのみのsmoke test)で、retry回数の上限遵守・Resumeの排他制御・
+Error diagnosticsのログ出力自体は正しく動くことを確認しています。直近の
+smoke testでは実際にGemini側の503が3回連続発生しましたが、これは**対策が
+機能している証拠**として記録しています(503→最大3 attemptsで正しく失敗終了、
+再実行時に該当ケースが再試行されないことを確認済み)。一方、**固定15ケース
+全件を使ったFull Evaluationでの効果検証(429/503の発生率が実際に下がったか)は
+未実施**です。「直した」ではなく「原因を特定し、検証可能な形で対策した。
+効果の実データ検証はこれから」という段階として記載しています。
 
 ## 技術構成
 
-| レイヤー | 技術 |
-|---|---|
-| Frontend | Next.js (App Router) / React / TypeScript |
-| Backend | Python / FastAPI / Pydantic / SQLAlchemy / Alembic |
-| Database | PostgreSQL (Docker Compose) |
-| Web検索 | Tavily API |
-| AI | Google Gemini API (`gemini-3.6-flash`, Structured Output) |
-| Testing | pytest (検索・LLM呼び出しはmock) |
+| レイヤー | 技術 | 補足 |
+|---|---|---|
+| Frontend | Next.js (App Router) / React / TypeScript | — |
+| Frontend Testing | Vitest / React Testing Library | コンポーネント単位の振る舞いを確認(外部API呼び出しなし) |
+| Backend | Python / FastAPI / Pydantic / SQLAlchemy / Alembic | — |
+| Backend Testing | pytest(201件、すべてmockで外部APIなし) | [Evaluationによる品質評価](#evaluationによる品質評価の取り組みサマリ)参照 |
+| Database | PostgreSQL (Docker Compose) | JSONB列・CHECK制約を活用 |
+| Web検索 | Tavily API | クレジットカード登録不要の無料枠があり、検索とLLM呼び出しを完全分離できる。[選定理由の詳細](#web検索provider選定phase-3) |
+| AI | Google Gemini API (`gemini-3.6-flash`, Structured Output) | コスト制約下でのprovider選定・モデル選定の過程自体も技術判断として記録している。[選定理由の詳細](#llm-provider選定) |
 
 ## ディレクトリ構成
 
@@ -42,24 +199,38 @@ LLMを2回呼んでいるわけではありません)。
 │   │   ├── main.py               # アプリのエントリーポイント
 │   │   ├── api/
 │   │   │   ├── research.py         # POST/GET /research, GET /research/{id}/result
-│   │   │   └── evidence.py         # GET /evidence/{id}
+│   │   │   ├── evidence.py         # GET /evidence/{id}
+│   │   │   └── suggestions.py      # POST /suggest-criteria(Suggest Points)
 │   │   ├── models/                 # research.py, comparison.py, source.py, evidence.py
-│   │   ├── schemas/                # research.py, criteria.py, evidence.py (Pydantic, API用)
+│   │   ├── schemas/                # research.py, criteria.py, evidence.py, suggestion.py (Pydantic, API用)
 │   │   ├── services/
-│   │   │   ├── search_client.py     # Tavily API呼び出し(Web検索)
+│   │   │   ├── search_client.py     # Tavily API呼び出し(Web検索・chunking・noise filtering)
 │   │   │   ├── llm_schemas.py       # LLM Structured Output用スキーマ
-│   │   │   ├── llm_client.py        # Gemini API呼び出し
-│   │   │   └── research_runner.py   # BackgroundTasksから呼ばれる処理本体
+│   │   │   ├── llm_client.py        # Gemini API呼び出し(retry/backoff/pacing・Error diagnostics)
+│   │   │   ├── research_runner.py   # BackgroundTasksから呼ばれる処理本体(2-stage pipeline)
+│   │   │   └── suggestion_service.py # Suggest Points用のビジネスロジック
 │   │   ├── db/session.py         # DB接続設定
 │   │   └── core/config.py        # 環境変数の読み込み
+│   ├── evaluation/                # Phase 4: AI Evaluation harness(本番コードは変更しない)
+│   │   ├── dataset.py                # 固定15ケースの評価セット
+│   │   ├── metrics.py                # ルールベースmetrics(Reliability/Answer Quality)
+│   │   ├── judge.py                  # LLM Judge(代表5ケース)
+│   │   ├── run_eval.py               # 実行オーケストレーション(Resume対応)
+│   │   └── resume_state.py           # 複数日に分割実行するためのstate管理
 │   ├── scripts/                  # 一度きりの検証用スクリプト(PoC)
-│   ├── tests/
+│   ├── tests/                    # pytest(201件)
 │   └── .env.example
 └── frontend/             # Next.js
-    ├── app/page.tsx                          # New Research画面
+    ├── app/page.tsx                          # Home(Learn/Compareの入口)
+    ├── app/explore/page.tsx                  # Explore: カテゴリ一覧
+    ├── app/explore/[category]/page.tsx       # Explore: カテゴリ別の技術一覧
+    ├── app/explore/technology/[id]/page.tsx  # Explore: 技術詳細
+    ├── app/compare/[itemA]/[itemB]/page.tsx  # Compare Setup(比較軸選択・Suggest Points)
     ├── app/research/[id]/page.tsx            # Research Progress画面(polling)
     ├── app/research/[id]/result/page.tsx     # Comparison Report画面
     ├── app/evidence/[id]/page.tsx            # Evidence Viewer画面
+    ├── components/SuggestPointsPanel.tsx     # Suggest Points UI
+    ├── data/                                 # 技術カタログの静的データ(categories/technologies等)
     ├── lib/api.ts                            # Backend呼び出し用クライアント
     ├── lib/criteria.ts                       # 比較軸の固定候補
     └── .env.local.example
@@ -615,7 +786,9 @@ Research処理(LLM呼び出し・比較生成)はFastAPIの`BackgroundTasks`で�
   返さず、HTTPステータスに応じた定型メッセージのみを返します
   (`research_runner.py`のエラーハンドリング参照)。
 
-## 既知の制限
+## 現在の制約と今後の改善予定
+
+**検証済みの既知の制限**(実データで確認済み):
 
 - LLMの回答が情報源の内容を完全に正確に要約している保証はない
   (Evidence Viewerで元の情報源を必ず確認する設計にしている)。実際に、
@@ -637,10 +810,22 @@ Research処理(LLM呼び出し・比較生成)はFastAPIの`BackgroundTasks`で�
   5D-eのprompt対策は数値の補完を対象にしており、この種の表現の強さの
   ドリフトまでは対象にしていない)。
 - Phase 5E(固定15ケースの再評価)でResearch Completion Rateが15/15→
-  10/15に低下した。retry/backoff/pacingのコード自体は変更していないが、
-  429/503がPhase 5Dのコード変更由来か外部要因かは未確定(Phase 5E/5F参照)。
-- AI Evaluation、History画面、Authentication、Cloud deploymentは未実装。
-- `BackgroundTasks`はdurableなジョブキューではない(上記参照)。
+  10/15に低下した事象は、Phase 5Gの調査でGemini Free TierのRPM/RPD上限の
+  実際の超過が原因であることを確認した(詳細は[Phase 5G](#phase-5g-rpm/rpd対策とevaluationのresume)参照)。
+  ただし対策(pacing変更・Error diagnostics)の効果を、固定15ケース全件の
+  Full Evaluationで実際に検証するのは未実施。
+- `BackgroundTasks`はdurableなジョブキューではない(永続的なジョブキューでは
+  なく、サーバー再起動時に実行中タスクが失われる。[設計上の判断メモ](#backgroundtasks-について重要な設計上の制限)参照)。
+
+**未実装のもの**:
+
+- Web一般公開(現時点ではローカル実行のみ)、ユーザー認証
+- History画面(過去のResearch一覧表示)、Cloud deployment手順
+- claim単位でcitationを紐付けるschema再設計、本番への常時LLM Judge導入
+
+**次にやること**: 分割実行(Resume)を使い、無料枠の制限内でFull Evaluationを
+実際に完走させ、Phase 5Gの対策の効果を実データで検証する予定です(詳細は
+[今後(Phase 4スコープ外)](#今後phase-4スコープ外)参照)。
 
 ## Phase 4: AI Evaluation
 
